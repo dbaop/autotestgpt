@@ -45,6 +45,8 @@ def create_app():
     
     return app
 
+app = create_app()
+
 def setup_logging(app):
     """配置日志"""
     # 创建日志目录
