@@ -1,0 +1,10 @@
+requests
+playwright
+litellm
+python-dotenv
+pytest
+allure-pytest
+openpyxl
+pymysql
+sqlalchemy
+litellm
