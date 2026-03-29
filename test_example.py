@@ -17,34 +17,34 @@ def test_imports():
     
     try:
         from config import Config
-        print("✓ config.py 导入成功")
+        print("[OK] config.py 导入成功")
         
         from models import db
-        print("✓ models.py 导入成功")
+        print("[OK] models.py 导入成功")
         
         from agent.base_agent import BaseAgent
-        print("✓ base_agent.py 导入成功")
+        print("[OK] base_agent.py 导入成功")
         
         from agent.req_agent import ReqAgent
-        print("✓ req_agent.py 导入成功")
+        print("[OK] req_agent.py 导入成功")
         
         from agent.case_agent import CaseAgent
-        print("✓ case_agent.py 导入成功")
+        print("[OK] case_agent.py 导入成功")
         
         from agent.code_agent import CodeAgent
-        print("✓ code_agent.py 导入成功")
+        print("[OK] code_agent.py 导入成功")
         
         from agent.exec_agent import ExecAgent
-        print("✓ exec_agent.py 导入成功")
+        print("[OK] exec_agent.py 导入成功")
         
         from flow.test_flow import AutoTestFlow
-        print("✓ test_flow.py 导入成功")
+        print("[OK] test_flow.py 导入成功")
         
         print("\n所有模块导入成功！")
         return True
         
     except ImportError as e:
-        print(f"✗ 导入失败: {e}")
+        print(f"[ERROR] 导入失败: {e}")
         return False
 
 def test_config():
@@ -62,7 +62,7 @@ def test_config():
     os.makedirs(Config.WORKSPACE, exist_ok=True)
     os.makedirs(Config.REPORT_DIR, exist_ok=True)
     
-    print("✓ 配置检查完成")
+    print("[OK] 配置检查完成")
     return True
 
 def test_database_connection():
@@ -82,11 +82,11 @@ def test_database_connection():
         with app.app_context():
             # 尝试连接数据库
             db.session.execute('SELECT 1')
-            print("✓ 数据库连接成功")
+            print("[OK] 数据库连接成功")
             return True
             
     except Exception as e:
-        print(f"✗ 数据库连接失败: {e}")
+        print(f"[ERROR] 数据库连接失败: {e}")
         print("提示: 请确保MySQL服务已启动，并正确配置.env文件")
         return False
 
@@ -101,22 +101,22 @@ def test_agent_initialization():
         from agent.exec_agent import ExecAgent
         
         req_agent = ReqAgent()
-        print("✓ ReqAgent 初始化成功")
+        print("[OK] ReqAgent 初始化成功")
         
         case_agent = CaseAgent()
-        print("✓ CaseAgent 初始化成功")
+        print("[OK] CaseAgent 初始化成功")
         
         code_agent = CodeAgent()
-        print("✓ CodeAgent 初始化成功")
+        print("[OK] CodeAgent 初始化成功")
         
         exec_agent = ExecAgent()
-        print("✓ ExecAgent 初始化成功")
+        print("[OK] ExecAgent 初始化成功")
         
-        print("✓ 所有智能体初始化成功")
+        print("[OK] 所有智能体初始化成功")
         return True
         
     except Exception as e:
-        print(f"✗ 智能体初始化失败: {e}")
+        print(f"[ERROR] 智能体初始化失败: {e}")
         return False
 
 def test_workflow_initialization():
@@ -127,16 +127,16 @@ def test_workflow_initialization():
         from flow.test_flow import AutoTestFlow
         
         workflow = AutoTestFlow()
-        print("✓ AutoTestFlow 初始化成功")
+        print("[OK] AutoTestFlow 初始化成功")
         
         status = workflow.get_status()
         print(f"工作流状态: {status['status']}")
         
-        print("✓ 工作流初始化成功")
+        print("[OK] 工作流初始化成功")
         return True
         
     except Exception as e:
-        print(f"✗ 工作流初始化失败: {e}")
+        print(f"[ERROR] 工作流初始化失败: {e}")
         return False
 
 def main():
@@ -160,7 +160,7 @@ def main():
             result = test_func()
             results.append((test_name, result))
         except Exception as e:
-            print(f"✗ 测试异常: {e}")
+            print(f"[ERROR] 测试异常: {e}")
             results.append((test_name, False))
     
     # 汇总结果
@@ -172,7 +172,7 @@ def main():
     total = len(results)
     
     for test_name, result in results:
-        status = "✓ 通过" if result else "✗ 失败"
+        status = "[OK] 通过" if result else "[ERROR] 失败"
         print(f"{test_name}: {status}")
         if result:
             passed += 1
@@ -180,14 +180,14 @@ def main():
     print(f"\n通过率: {passed}/{total} ({passed/total*100:.1f}%)")
     
     if passed == total:
-        print("\n🎉 所有测试通过！项目可以正常运行。")
+        print("\n[SUCCESS] 所有测试通过！项目可以正常运行。")
         print("\n下一步:")
         print("1. 配置.env文件中的API密钥和数据库密码")
         print("2. 运行 python init_db.py 初始化数据库")
         print("3. 运行 python main.py 启动服务")
         print("4. 访问 http://localhost:8000 查看API文档")
     else:
-        print("\n⚠️ 部分测试失败，请检查相关问题。")
+        print("\n[WARNING] 部分测试失败，请检查相关问题。")
     
     return passed == total
 
