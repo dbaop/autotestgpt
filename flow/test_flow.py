@@ -48,30 +48,46 @@ class AutoTestFlow:
             
             logger.info(f"开始执行工作流，输入数据: {json.dumps(input_data, ensure_ascii=False)[:200]}...")
             
-            # 获取需求ID
             requirement_id = input_data.get('requirement_id')
             project_id = input_data.get('project_id', 1)
+            resume_from = input_data.get('resume_from')
             
             if not requirement_id:
                 raise ValueError("缺少requirement_id")
             
-            # 步骤1: 需求解析
-            self.current_step = 'parse_requirement'
-            structured_req = self.parse_requirement(input_data['demand'], requirement_id)
+            requirement = db.session.get(Requirement, requirement_id)
+            structured_req = requirement.structured_data if requirement else None
             
-            # 步骤2: 测试用例设计
-            self.current_step = 'design_test_cases'
-            test_cases = self.design_test_cases(structured_req, requirement_id)
+            if resume_from == 'cases_generated':
+                test_cases = {'test_cases': []}
+                cases = TestCase.query.filter_by(requirement_id=requirement_id).all()
+                for case in cases:
+                    test_cases['test_cases'].append({
+                        'title': case.title,
+                        'description': case.description,
+                        'test_type': case.test_type,
+                        'priority': case.priority,
+                        'test_steps': case.steps
+                    })
+            elif resume_from == 'code_generated':
+                test_cases = {'test_cases': []}
+                test_scripts = {'scripts': []}
+            else:
+                self.current_step = 'parse_requirement'
+                structured_req = self.parse_requirement(input_data['demand'], requirement_id)
+                
+                self.current_step = 'design_test_cases'
+                test_cases = self.design_test_cases(structured_req, requirement_id)
             
-            # 步骤3: 代码生成
-            self.current_step = 'generate_code'
-            test_scripts = self.generate_code(test_cases, requirement_id)
+            if resume_from != 'code_generated':
+                self.current_step = 'generate_code'
+                test_scripts = self.generate_code(test_cases, requirement_id)
+            else:
+                test_scripts = {'scripts': []}
             
-            # 步骤4: 执行测试
             self.current_step = 'execute_tests'
             execution_results = self.execute_tests(test_scripts, requirement_id)
             
-            # 完成工作流
             self.status = 'completed'
             self.end_time = datetime.utcnow()
             
@@ -125,15 +141,14 @@ class AutoTestFlow:
             structured_req = self.req_agent.process(input_data)
             
             # 更新需求记录
-            with db.session.begin():
-                requirement = Requirement.query.get(requirement_id)
-                if requirement:
-                    requirement.title = structured_req.get('title', requirement.title)
-                    requirement.description = structured_req.get('description', requirement.description)
-                    requirement.structured_data = structured_req
-                    requirement.status = 'parsed'
-                    requirement.updated_at = datetime.utcnow()
-                    db.session.commit()
+            requirement = db.session.get(Requirement, requirement_id)
+            if requirement:
+                requirement.title = structured_req.get('title', requirement.title)
+                requirement.description = structured_req.get('description', requirement.description)
+                requirement.structured_data = structured_req
+                requirement.status = 'parsed'
+                requirement.updated_at = datetime.utcnow()
+                db.session.commit()
             
             logger.info(f"需求解析完成: {structured_req.get('title', '未命名')}")
             return structured_req
@@ -153,23 +168,23 @@ class AutoTestFlow:
             test_cases = self.case_agent.process(input_data)
             
             # 保存测试用例到数据库
-            with db.session.begin():
-                requirement = Requirement.query.get(requirement_id)
-                if requirement:
-                    for case_data in test_cases.get('test_cases', []):
-                        test_case = TestCase(
-                            requirement_id=requirement_id,
-                            title=case_data.get('title', '未命名'),
-                            description=case_data.get('description', ''),
-                            test_type=case_data.get('test_type', 'api'),
-                            priority=case_data.get('priority', 'medium'),
-                            steps=case_data.get('test_steps', []),
-                            expected_results=case_data.get('test_data', {}).get('expected_output')
-                        )
-                        db.session.add(test_case)
-                    
-                    requirement.updated_at = datetime.utcnow()
-                    db.session.commit()
+            requirement = db.session.get(Requirement, requirement_id)
+            if requirement:
+                for case_data in test_cases.get('test_cases', []):
+                    test_case = TestCase(
+                        requirement_id=requirement_id,
+                        title=case_data.get('title', '未命名'),
+                        description=case_data.get('description', ''),
+                        test_type=case_data.get('test_type', 'api'),
+                        priority=case_data.get('priority', 'medium'),
+                        steps=case_data.get('test_steps', []),
+                        expected_results=case_data.get('test_data', {}).get('expected_output')
+                    )
+                    db.session.add(test_case)
+                
+                requirement.status = 'cases_generated'
+                requirement.updated_at = datetime.utcnow()
+                db.session.commit()
             
             logger.info(f"测试用例设计完成，生成 {len(test_cases.get('test_cases', []))} 个测试用例")
             return test_cases
@@ -192,43 +207,37 @@ class AutoTestFlow:
             saved_files = self.code_agent.save_scripts_to_files(test_scripts)
             
             # 保存脚本信息到数据库
-            with db.session.begin():
-                # 获取该需求的所有测试用例
-                requirement_cases = TestCase.query.filter_by(requirement_id=requirement_id).all()
-                case_map = {case.id: case for case in requirement_cases}
+            # 获取该需求的所有测试用例
+            requirement_cases = TestCase.query.filter_by(requirement_id=requirement_id).all()
+            
+            for script_data in test_scripts.get('scripts', []):
+                test_case_id = None
+                script_id = script_data.get('id', '')
                 
-                for script_data in test_scripts.get('scripts', []):
-                    # 查找对应的测试用例（通过ID匹配）
-                    test_case_id = None
-                    script_id = script_data.get('id', '')
-                    
-                    # 尝试从ID中提取测试用例ID
-                    if script_id.startswith('TC-'):
-                        # 查找对应的测试用例
-                        for case in requirement_cases:
-                            if case.title and script_id in case.title:
-                                test_case_id = case.id
-                                break
-                    
-                    # 如果没找到，使用第一个测试用例
-                    if not test_case_id and requirement_cases:
-                        test_case_id = requirement_cases[0].id
-                    
-                    if test_case_id:
-                        test_script = TestScript(
-                            test_case_id=test_case_id,
-                            script_type=script_data.get('language', 'python'),
-                            script_content=script_data.get('code', ''),
-                            file_path=script_data.get('file_path', ''),
-                            status='generated'
-                        )
-                        db.session.add(test_script)
+                if script_id.startswith('TC-'):
+                    for case in requirement_cases:
+                        if case.title and script_id in case.title:
+                            test_case_id = case.id
+                            break
                 
-                # 更新需求状态
-                requirement = Requirement.query.get(requirement_id)
-                if requirement:
-                    requirement.updated_at = datetime.utcnow()
-                    db.session.commit()
+                if not test_case_id and requirement_cases:
+                    test_case_id = requirement_cases[0].id
+                
+                if test_case_id:
+                    test_script = TestScript(
+                        test_case_id=test_case_id,
+                        script_type=script_data.get('language', 'python'),
+                        script_content=script_data.get('code', ''),
+                        file_path=script_data.get('file_path', ''),
+                        status='generated'
+                    )
+                    db.session.add(test_script)
+            
+            requirement = db.session.get(Requirement, requirement_id)
+            if requirement:
+                requirement.status = 'code_generated'
+                requirement.updated_at = datetime.utcnow()
+                db.session.commit()
             
             logger.info(f"测试代码生成完成，生成 {len(test_scripts.get('scripts', []))} 个脚本，保存 {len(saved_files)} 个文件")
             return test_scripts
@@ -243,24 +252,84 @@ class AutoTestFlow:
         try:
             logger.info(f"步骤4: 执行测试 (需求ID: {requirement_id})")
             
-            # 获取该需求的测试脚本
-            with db.session.begin():
-                requirement_cases = TestCase.query.filter_by(requirement_id=requirement_id).all()
-                case_ids = [case.id for case in requirement_cases]
-                
-                test_scripts_db = TestScript.query.filter(TestScript.test_case_id.in_(case_ids)).all()
+            # 更新需求状态为执行中
+            requirement = db.session.get(Requirement, requirement_id)
+            if requirement:
+                requirement.status = 'executing'
+                requirement.execution_progress = {
+                    'total': 0,
+                    'executed': 0,
+                    'current_step': '准备中',
+                    'start_time': datetime.utcnow().isoformat(),
+                    'details': []
+                }
+                db.session.commit()
+                logger.info(f"更新需求状态为执行中: {requirement_id}")
+            else:
+                logger.error(f"需求不存在: {requirement_id}")
+                return {'executions': [], 'error': '需求不存在'}
+            
+            requirement_cases = TestCase.query.filter_by(requirement_id=requirement_id).all()
+            case_ids = [case.id for case in requirement_cases]
+            
+            test_scripts_db = TestScript.query.filter(TestScript.test_case_id.in_(case_ids)).all()
             
             if not test_scripts_db:
                 logger.warning(f"没有找到测试脚本，跳过执行")
+                # 更新需求状态
+                if requirement:
+                    requirement.status = 'executed'
+                    requirement.execution_progress = {
+                        'total': 0,
+                        'executed': 0,
+                        'completed': True,
+                        'end_time': datetime.utcnow().isoformat(),
+                        'details': []
+                    }
+                    requirement.updated_at = datetime.utcnow()
+                    db.session.commit()
                 return {'executions': [], 'message': '没有测试脚本可执行'}
             
-            # 执行测试
+            total_scripts = len(test_scripts_db)
+            executed_scripts = 0
+            
             execution_results = []
-            for test_script in test_scripts_db:
+            execution_details = []
+            
+            for index, test_script in enumerate(test_scripts_db):
                 try:
-                    logger.info(f"执行测试脚本: {test_script.id} ({test_script.file_path})")
+                    logger.info(f"执行测试脚本 {index + 1}/{total_scripts}: {test_script.id} ({test_script.file_path})")
                     
-                    # 调用执行智能体
+                    # 记录执行开始
+                    script_detail = {
+                        'script_id': test_script.id,
+                        'script_name': test_script.file_path,
+                        'case_id': test_script.test_case_id,
+                        'status': 'running',
+                        'start_time': datetime.utcnow().isoformat(),
+                        'steps': []
+                    }
+                    execution_details.append(script_detail)
+                    
+                    # 更新脚本状态为执行中
+                    test_script.status = 'running'
+                    db.session.commit()
+                    
+                    # 更新需求执行进度
+                    if requirement:
+                        requirement.execution_progress = {
+                            'total': total_scripts,
+                            'executed': executed_scripts,
+                            'current_script_id': test_script.id,
+                            'current_script_name': test_script.file_path,
+                            'current_case_id': test_script.test_case_id,
+                            'current_step': f'执行脚本 {index + 1}/{total_scripts}',
+                            'start_time': requirement.execution_progress.get('start_time'),
+                            'details': execution_details
+                        }
+                        db.session.commit()
+                        logger.info(f"更新执行进度: {index + 1}/{total_scripts}")
+                    
                     input_data = {
                         'script_id': test_script.id,
                         'script_content': test_script.script_content,
@@ -268,15 +337,36 @@ class AutoTestFlow:
                         'script_type': test_script.script_type
                     }
                     
-                    execution_result = self.exec_agent.process(input_data)
+                    # 设置执行超时
+                    import time
+                    start_execution = time.time()
                     
-                    # 保存执行记录
+                    # 执行测试脚本
+                    try:
+                        execution_result = self.exec_agent.process(input_data)
+                    except Exception as exec_error:
+                        logger.error(f"执行代理出错: {exec_error}")
+                        execution_result = {
+                            'status': 'error',
+                            'error': str(exec_error)
+                        }
+                    
+                    execution_time = time.time() - start_execution
+                    logger.info(f"脚本执行耗时: {execution_time:.2f}秒")
+                    
+                    # 更新执行详情
+                    script_detail['status'] = execution_result.get('status', 'completed')
+                    script_detail['end_time'] = datetime.utcnow().isoformat()
+                    script_detail['execution_time'] = execution_result.get('execution_time', execution_time)
+                    script_detail['error'] = execution_result.get('error')
+                    script_detail['result'] = execution_result.get('result', {})
+                    
                     execution_record = ExecutionRecord(
                         test_script_id=test_script.id,
                         status=execution_result.get('status', 'unknown'),
                         result_data=execution_result.get('result', {}),
                         error_message=execution_result.get('error'),
-                        execution_time=execution_result.get('execution_time'),
+                        execution_time=execution_result.get('execution_time', execution_time),
                         report_path=execution_result.get('report_path'),
                         started_at=datetime.fromisoformat(execution_result.get('started_at')) if execution_result.get('started_at') else datetime.utcnow(),
                         finished_at=datetime.utcnow()
@@ -285,13 +375,17 @@ class AutoTestFlow:
                     db.session.add(execution_record)
                     execution_results.append(execution_result)
                     
-                    # 更新脚本状态
                     test_script.status = 'executed'
+                    executed_scripts += 1
                     
                 except Exception as e:
                     logger.error(f"执行测试脚本失败 (ID: {test_script.id}): {e}")
                     
-                    # 记录失败的执行
+                    # 更新执行详情
+                    script_detail['status'] = 'error'
+                    script_detail['end_time'] = datetime.utcnow().isoformat()
+                    script_detail['error'] = str(e)
+                    
                     execution_record = ExecutionRecord(
                         test_script_id=test_script.id,
                         status='error',
@@ -306,25 +400,55 @@ class AutoTestFlow:
                         'status': 'error',
                         'error': str(e)
                     })
-            
-            # 提交所有更改
-            db.session.commit()
+                    
+                    test_script.status = 'error'
+                    executed_scripts += 1
+                finally:
+                    # 确保提交更改
+                    try:
+                        db.session.commit()
+                        logger.info(f"提交数据库更改成功")
+                    except Exception as commit_error:
+                        logger.error(f"提交数据库更改失败: {commit_error}")
+                        db.session.rollback()
             
             # 更新需求状态
-            with db.session.begin():
-                requirement = Requirement.query.get(requirement_id)
-                if requirement:
-                    requirement.status = 'executed'
-                    requirement.updated_at = datetime.utcnow()
+            if requirement:
+                requirement.status = 'executed'
+                requirement.execution_progress = {
+                    'total': total_scripts,
+                    'executed': executed_scripts,
+                    'completed': True,
+                    'end_time': datetime.utcnow().isoformat(),
+                    'details': execution_details
+                }
+                requirement.updated_at = datetime.utcnow()
+                try:
                     db.session.commit()
+                    logger.info(f"更新需求状态为已执行: {requirement_id}")
+                except Exception as commit_error:
+                    logger.error(f"更新需求状态失败: {commit_error}")
+                    db.session.rollback()
             
             logger.info(f"测试执行完成，执行 {len(execution_results)} 个脚本")
             return {'executions': execution_results}
             
         except Exception as e:
-            logger.error(f"测试执行失败: {e}")
+            logger.error(f"执行测试失败: {e}")
+            # 更新需求状态为错误
+            if requirement:
+                requirement.status = 'error'
+                requirement.execution_progress = {
+                    'error': str(e),
+                    'end_time': datetime.utcnow().isoformat()
+                }
+                try:
+                    db.session.commit()
+                except Exception as commit_error:
+                    logger.error(f"更新错误状态失败: {commit_error}")
+                    db.session.rollback()
             self.errors.append(f"测试执行失败: {e}")
-            raise
+            return {'executions': [], 'error': str(e)}
     
     def get_status(self) -> Dict[str, Any]:
         """获取工作流状态"""

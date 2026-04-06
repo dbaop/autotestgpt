@@ -192,36 +192,34 @@ class ExecAgent(BaseAgent):
             
             return {
                 'status': status,
-                'error': error,
                 'output': output,
+                'error': error,
                 'execution_time': execution_time,
                 'started_at': started_at.isoformat(),
                 'finished_at': finished_at.isoformat(),
-                'returncode': result.returncode,
                 'assertions': report_data.get('summary', {}).get('total', 0),
-                'passed': report_data.get('summary', {}).get('passed', 0),
-                'failed': report_data.get('summary', {}).get('failed', 0),
-                'errors': report_data.get('summary', {}).get('error', 0),
-                'report_data': report_data
+                'failures': report_data.get('summary', {}).get('failed', 0),
+                'errors': report_data.get('summary', {}).get('errors', 0)
             }
             
         except subprocess.TimeoutExpired:
             finished_at = datetime.utcnow()
             execution_time = (finished_at - started_at).total_seconds()
             
+            logger.error(f"脚本执行超时 (超过5分钟): {file_path}")
             return {
-                'status': 'timeout',
-                'error': '测试执行超时（5分钟）',
+                'status': 'error',
+                'error': '脚本执行超时 (超过5分钟)',
                 'output': '',
                 'execution_time': execution_time,
                 'started_at': started_at.isoformat(),
                 'finished_at': finished_at.isoformat()
             }
-            
         except Exception as e:
             finished_at = datetime.utcnow()
             execution_time = (finished_at - started_at).total_seconds()
             
+            logger.error(f"执行Python脚本失败: {e}")
             return {
                 'status': 'error',
                 'error': str(e),

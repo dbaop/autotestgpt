@@ -3,7 +3,7 @@ API 模块
 """
 
 from flask import Blueprint
-from .routes import requirements, test_cases, executions, projects
+from .routes import requirements, test_cases, executions, projects, conversations
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -23,3 +23,11 @@ api_blueprint.add_url_rule('/executions/<int:exec_id>', view_func=executions.get
 api_blueprint.add_url_rule('/projects', view_func=projects.get_projects, methods=['GET'])
 api_blueprint.add_url_rule('/projects', view_func=projects.create_project, methods=['POST'])
 api_blueprint.add_url_rule('/projects/<int:project_id>', view_func=projects.get_project, methods=['GET'])
+
+# 对话路由
+api_blueprint.add_url_rule('/conversations', view_func=conversations.get_conversations, methods=['GET'])
+api_blueprint.add_url_rule('/conversations', view_func=conversations.create_conversation, methods=['POST'])
+api_blueprint.add_url_rule('/conversations/<int:conv_id>', view_func=conversations.get_conversation, methods=['GET'])
+api_blueprint.add_url_rule('/conversations/<int:conv_id>', view_func=conversations.delete_conversation, methods=['DELETE'])
+api_blueprint.add_url_rule('/conversations/<int:conv_id>/messages', view_func=conversations.get_messages, methods=['GET'])
+api_blueprint.add_url_rule('/conversations/<int:conv_id>/messages', view_func=conversations.send_message, methods=['POST'])

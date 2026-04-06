@@ -43,13 +43,13 @@ def get_test_cases():
 def get_test_case(case_id):
     """获取单个测试用例详情"""
     try:
-        test_case = TestCase.query.get_or_404(case_id)
+        test_case = db.get_or_404(TestCase, case_id)
         
         # 获取关联的测试脚本
         test_scripts = TestScript.query.filter_by(test_case_id=case_id).all()
         
         # 获取需求信息
-        requirement = Requirement.query.get(test_case.requirement_id)
+        requirement = db.session.get(Requirement, test_case.requirement_id)
         
         result = test_case.to_dict()
         result['test_scripts'] = [ts.to_dict() for ts in test_scripts]

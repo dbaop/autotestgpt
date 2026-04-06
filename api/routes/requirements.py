@@ -41,7 +41,7 @@ def get_requirements():
 def get_requirement(req_id):
     """获取单个需求详情"""
     try:
-        requirement = Requirement.query.get_or_404(req_id)
+        requirement = db.get_or_404(Requirement, req_id)
         
         # 获取关联的测试用例
         test_cases = TestCase.query.filter_by(requirement_id=req_id).all()
@@ -98,7 +98,7 @@ def create_requirement():
 def update_requirement(req_id):
     """更新需求"""
     try:
-        requirement = Requirement.query.get_or_404(req_id)
+        requirement = db.get_or_404(Requirement, req_id)
         data = request.get_json()
         
         if 'title' in data:
@@ -128,7 +128,7 @@ def update_requirement(req_id):
 def delete_requirement(req_id):
     """删除需求"""
     try:
-        requirement = Requirement.query.get_or_404(req_id)
+        requirement = db.get_or_404(Requirement, req_id)
         
         db.session.delete(requirement)
         db.session.commit()

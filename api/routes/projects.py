@@ -34,7 +34,7 @@ def get_projects():
 def get_project(project_id):
     """获取单个项目详情"""
     try:
-        project = Project.query.get_or_404(project_id)
+        project = db.get_or_404(Project, project_id)
         
         # 获取项目下的需求
         requirements = Requirement.query.filter_by(project_id=project_id).all()

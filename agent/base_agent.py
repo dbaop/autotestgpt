@@ -29,35 +29,53 @@ class BaseAgent(ABC):
     def call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
         调用大模型
-        
+
         Args:
             prompt: 用户提示词
             system_prompt: 系统提示词
-            
+
         Returns:
             模型响应文本
         """
         try:
             messages = []
-            
+
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
-            
+
             messages.append({"role": "user", "content": prompt})
-            
-            response = litellm.completion(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                api_key=Config.DEEPSEEK_API_KEY
-            )
-            
+
+            # 优先使用 MiniMax API
+            if Config.MINIMAX_API_KEY:
+                response = litellm.completion(
+                    model="minimax/abab6.5s-chat",
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    api_key=Config.MINIMAX_API_KEY,
+                    api_base="https://api.minimax.chat/v1"
+                )
+            elif Config.DEEPSEEK_API_KEY:
+                response = litellm.completion(
+                    model=self.model,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    api_key=Config.DEEPSEEK_API_KEY
+                )
+            else:
+                response = litellm.completion(
+                    model=self.model,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens
+                )
+
             content = response.choices[0].message.content
             logger.info(f"LLM调用成功，模型: {self.model}, 响应长度: {len(content)}")
-            
+
             return content
-            
+
         except Exception as e:
             logger.error(f"LLM调用失败: {e}")
             raise

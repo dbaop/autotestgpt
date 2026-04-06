@@ -43,11 +43,11 @@ def get_executions():
 def get_execution(exec_id):
     """获取单个执行记录详情"""
     try:
-        execution = ExecutionRecord.query.get_or_404(exec_id)
+        execution = db.get_or_404(ExecutionRecord, exec_id)
         
         # 获取关联的测试脚本和测试用例
-        test_script = TestScript.query.get(execution.test_script_id)
-        test_case = TestCase.query.get(test_script.test_case_id) if test_script else None
+        test_script = db.session.get(TestScript, execution.test_script_id)
+        test_case = db.session.get(TestCase, test_script.test_case_id) if test_script else None
         
         result = execution.to_dict()
         result['test_script'] = test_script.to_dict() if test_script else None
