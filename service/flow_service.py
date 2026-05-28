@@ -1,0 +1,189 @@
+"""
+Flow application service.
+"""
+
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from typing import Any
+
+from agent.exec_agent import ExecAgent
+from flow.test_flow import AutoTestFlow
+from models import ExecutionRecord, Requirement, TestCase, TestScript, db
+from service.errors import NotFoundError, ValidationError
+
+
+_executor = ThreadPoolExecutor(max_workers=4)
+_flow_registry: dict[int, dict[str, Any]] = {}
+_registry_lock = threading.Lock()
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def _set_requirement_status(requirement_id: int, status: str, execution_progress: dict | None = None):
+    requirement = db.session.get(Requirement, requirement_id)
+    if not requirement:
+        raise NotFoundError(f"Requirement {requirement_id} not found")
+    requirement.status = status
+    if execution_progress is not None:
+        requirement.execution_progress = execution_progress
+    db.session.commit()
+    return requirement
+
+
+def execute_flow_async(flow, flow_data, requirement_id):
+    flow_id = str(id(flow))
+    try:
+        with _registry_lock:
+            _flow_registry[requirement_id] = {"flow_id": flow_id, "status": "running"}
+        result = flow.run(flow_data)
+        requirement = db.session.get(Requirement, requirement_id)
+        if requirement:
+            requirement.status = "completed" if isinstance(result, dict) and result.get("status") == "success" else "error"
+            requirement.execution_progress = result
+            db.session.commit()
+        with _registry_lock:
+            _flow_registry[requirement_id] = {"flow_id": flow_id, "status": result.get("status", "error")}
+    except Exception as e:
+        requirement = db.session.get(Requirement, requirement_id)
+        if requirement:
+            requirement.status = "error"
+            db.session.commit()
+        with _registry_lock:
+            _flow_registry[requirement_id] = {"flow_id": flow_id, "status": "error", "error": str(e)}
+
+
+def start_flow(data: dict):
+    demand = (data.get("demand") or "").strip()
+    if not demand:
+        raise ValidationError("Please provide `demand` field")
+
+    project_id = data.get("project_id", 1)
+    requirement = Requirement(
+        title=data.get("title") or f"Requirement-{_now().strftime('%Y%m%d-%H%M%S')}",
+        description=demand[:100] + "..." if len(demand) > 100 else demand,
+        raw_text=demand,
+        status="pending",
+        knowledge_base_id=data.get("knowledge_base_id"),
+        project_id=project_id,
+    )
+    db.session.add(requirement)
+    db.session.commit()
+
+    flow = AutoTestFlow()
+    flow_data = {"demand": demand, "requirement_id": requirement.id, "project_id": project_id}
+    review_config = data.get("review") or data.get("review_config")
+    if review_config:
+        flow_data["review"] = review_config
+
+    with _registry_lock:
+        _flow_registry[requirement.id] = {"flow_id": str(id(flow)), "status": "pending"}
+    _executor.submit(execute_flow_async, flow, flow_data, requirement.id)
+
+    return {
+        "message": "Test flow started",
+        "requirement_id": requirement.id,
+        "status": "processing",
+        "flow_id": str(id(flow)),
+    }
+
+
+def get_flow_status(requirement_id: int):
+    requirement = db.session.get(Requirement, requirement_id)
+    if not requirement:
+        raise NotFoundError(f"Requirement {requirement_id} not found")
+    with _registry_lock:
+        flow_info = _flow_registry.get(requirement_id, {})
+    return {
+        "requirement_id": requirement_id,
+        "db_status": requirement.status,
+        "flow_status": flow_info.get("status", "unknown"),
+        "execution_progress": requirement.execution_progress,
+    }
+
+
+def resume_flow(requirement_id: int):
+    requirement = db.session.get(Requirement, requirement_id)
+    if not requirement:
+        raise NotFoundError(f"Requirement {requirement_id} not found")
+
+    current_status = requirement.status
+    if current_status in ("executed", "completed"):
+        return {"message": "Flow already completed", "status": current_status}, 200
+
+    if current_status == "executing":
+        with _registry_lock:
+            fi = _flow_registry.get(requirement_id, {})
+        if fi.get("status") == "running":
+            return {"message": "Flow is running", "status": current_status}, 200
+
+    flow = AutoTestFlow()
+    flow_data = {"demand": requirement.raw_text, "requirement_id": requirement_id, "project_id": requirement.project_id or 1}
+
+    if current_status == "error":
+        existing_cases = TestCase.query.filter_by(requirement_id=requirement_id).all()
+        case_ids = [c.id for c in existing_cases]
+        script_count = TestScript.query.filter(TestScript.test_case_id.in_(case_ids)).count() if case_ids else 0
+        if script_count:
+            flow_data["resume_from"] = "code_generated"
+            requirement.status = "code_generated"
+        elif existing_cases:
+            flow_data["resume_from"] = "cases_generated"
+            requirement.status = "cases_generated"
+        else:
+            requirement.status = "pending"
+        requirement.execution_progress = {"retrying": True, "previous_status": current_status, "retry_started_at": _now().isoformat()}
+        db.session.commit()
+    elif current_status == "parsed":
+        if TestCase.query.filter_by(requirement_id=requirement_id).first():
+            requirement.status = "cases_generated"
+            db.session.commit()
+        flow_data["resume_from"] = "cases_generated"
+    elif current_status in ("cases_generated", "code_generated"):
+        flow_data["resume_from"] = current_status
+
+    _executor.submit(execute_flow_async, flow, flow_data, requirement_id)
+    return {
+        "message": "Flow resumed",
+        "requirement_id": requirement_id,
+        "previous_status": current_status,
+        "status": "processing",
+    }, 202
+
+
+def retry_script(script_id: int):
+    script = db.session.get(TestScript, script_id)
+    if not script:
+        raise NotFoundError(f"Test script {script_id} not found")
+
+    exec_agent = ExecAgent()
+    result = exec_agent.process(
+        {
+            "script_id": script.id,
+            "script_content": script.script_content,
+            "file_path": script.file_path,
+            "script_type": script.script_type,
+        }
+    )
+    record = ExecutionRecord(
+        test_script_id=script.id,
+        status=result.get("status", "unknown"),
+        result_data=result.get("result", {}),
+        error_message=result.get("error"),
+        execution_time=result.get("execution_time", 0),
+        report_path=result.get("report_path"),
+        started_at=_now(),
+        finished_at=_now(),
+    )
+    db.session.add(record)
+    script.status = "executed" if result.get("status") == "success" else "error"
+    db.session.commit()
+    return {
+        "message": "Script retry completed",
+        "script_id": script.id,
+        "status": result.get("status"),
+        "execution_time": result.get("execution_time"),
+        "error": result.get("error"),
+    }

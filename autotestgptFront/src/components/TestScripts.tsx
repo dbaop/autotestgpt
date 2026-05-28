@@ -1,135 +1,84 @@
-import React, { useState, useEffect } from 'react'
-import { scriptsApi } from '../api'
+import { useEffect, useState } from 'react'
+import { scriptsApi, TestScript } from '../api'
 
-interface TestScript {
-  id: number
-  test_case_id: number
-  script_type: string
-  file_path: string
-  status: string
-  created_at: string
-  content: string
+const S = {
+  bg: 'var(--bg-elevated)', bd: 'var(--border-default)', cyan: 'var(--accent-cyan)',
+  em: 'var(--accent-emerald)', am: 'var(--accent-amber)', ro: 'var(--accent-magenta)',
+  tx: 'var(--text-primary)', t2: 'var(--text-secondary)', t3: 'var(--text-muted)',
+  mono: 'var(--font-mono)',
 }
 
-interface TestScriptsProps {
-  requirementId: number
-}
+interface TestScriptsProps { requirementId: number }
 
-const TestScripts: React.FC<TestScriptsProps> = ({ requirementId }) => {
+export default function TestScripts({ requirementId }: TestScriptsProps) {
   const [scripts, setScripts] = useState<TestScript[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [selectedScript, setSelectedScript] = useState<TestScript | null>(null)
+  const [selectedScriptId, setSelectedScriptId] = useState<number | null>(null)
 
   const loadScripts = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const response = await scriptsApi.list(requirementId)
-      setScripts(response.data)
-    } catch (err) {
-      setError('获取测试脚本失败')
-      console.error('Failed to fetch test scripts:', err)
-    } finally {
-      setLoading(false)
-    }
+    if (!requirementId) return
+    setLoading(true); setError(null)
+    try { const r = await scriptsApi.list(requirementId); setScripts(r.data || []) }
+    catch { setError('获取测试脚本失败') }
+    finally { setLoading(false) }
   }
 
-  useEffect(() => {
-    if (requirementId) {
-      loadScripts()
-    }
-  }, [requirementId])
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'generated':
-        return 'text-blue-600'
-      case 'running':
-        return 'text-yellow-600'
-      case 'executed':
-        return 'text-green-600'
-      case 'error':
-        return 'text-red-600'
-      default:
-        return 'text-gray-600'
-    }
-  }
-
-  const getStatusText = (status: string) => {
-    switch (status) {
-      case 'generated':
-        return '已生成'
-      case 'running':
-        return '执行中'
-      case 'executed':
-        return '已执行'
-      case 'error':
-        return '错误'
-      default:
-        return status
-    }
-  }
+  useEffect(() => { loadScripts() }, [requirementId])
 
   return (
-    <div className="bg-white rounded-lg shadow p-6 mb-6">
-      <div className="flex justify-between items-center mb-4">
-        <h3 className="text-lg font-semibold">测试脚本</h3>
-        <button
-          onClick={loadScripts}
-          disabled={loading}
-          className="text-sm px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
-        >
+    <section className="gradient-border-card panel-inner">
+      <div style={{ display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16 }}>
+        <div>
+          <div style={{ fontFamily:S.mono,fontSize:11,letterSpacing:'0.28em',color:S.t3,textTransform:'uppercase',marginBottom:6 }}>/scripts</div>
+          <h2 style={{ fontFamily:'var(--font-display)',fontSize:22,fontWeight:800,color:S.tx,margin:0 }}>测试脚本</h2>
+        </div>
+        <button type="button" onClick={loadScripts} disabled={loading} className="btn btn-secondary"
+          style={{ padding: '6px 14px', fontSize: 11 }}>
           {loading ? '加载中...' : '刷新'}
         </button>
       </div>
 
-      {error && (
-        <div className="mb-4 p-3 bg-red-50 text-red-600 rounded">
-          {error}
-        </div>
-      )}
+      {error && <div style={{ marginBottom:12,padding:'10px 14px',borderRadius:10,border:`1px solid rgba(244,63,94,0.25)`,background:'rgba(244,63,94,0.06)',fontFamily:S.mono,fontSize:11,color:S.ro }}>[!] {error}</div>}
 
-      {scripts.length === 0 && !loading ? (
-        <div className="text-center py-8 text-gray-500">
-          暂无测试脚本
-        </div>
+      {!scripts.length && !loading ? (
+        <div style={{ textAlign:'center',padding:36,color:S.t3,fontFamily:S.mono,fontSize:12,border:`1px dashed ${S.bd}`,borderRadius:12 }}>暂无脚本</div>
       ) : (
-        <div className="space-y-4">
-          {scripts.map((script) => (
-            <div key={script.id} className="border rounded-lg overflow-hidden">
-              <div 
-                className="p-4 bg-gray-50 cursor-pointer hover:bg-gray-100"
-                onClick={() => setSelectedScript(selectedScript?.id === script.id ? null : script)}
-              >
-                <div className="flex justify-between items-center">
+        <div style={{ display:'flex',flexDirection:'column',gap:8 }}>
+          {scripts.map(script => {
+            const selected = selectedScriptId === script.id
+            return (
+              <article key={script.id} style={{ borderRadius:14,border:`1px solid ${S.bd}`,overflow:'hidden' }}>
+                <button type="button" onClick={() => setSelectedScriptId(selected ? null : script.id)}
+                  style={{ display:'flex',width:'100%',justifyContent:'space-between',alignItems:'flex-start',gap:12,padding:'14px 16px',background:selected ? 'rgba(0,229,255,0.04)' : 'rgba(255,255,255,0.01)',border:'none',cursor:'pointer',textAlign:'left',transition:'background 0.15s' }}>
                   <div>
-                    <h4 className="font-medium">{script.file_path?.split('\\').pop() || `脚本 ${script.id}`}</h4>
-                    <div className="text-sm text-gray-600 mt-1">
-                      类型: {script.script_type} | 用例ID: {script.test_case_id} | 
-                      状态: <span className={getStatusColor(script.status)}>{getStatusText(script.status)}</span>
+                    <div style={{ fontFamily:S.mono,fontSize:12,fontWeight:700,color:S.tx }}>
+                      {script.file_path?.split('\\').pop() || `script_${script.id}`}
+                    </div>
+                    <div style={{ fontFamily:S.mono,fontSize:10,color:S.t3,marginTop:2 }}>
+                      {script.script_type} &middot; case #{script.test_case_id} &middot;
+                      <span className={`status-badge ${script.status}`} style={{ marginLeft: 8, verticalAlign: 'middle' }}>
+                        {script.status}
+                      </span>
                     </div>
                   </div>
-                  <div className="text-sm text-gray-500">
+                  <div style={{ fontFamily:S.mono,fontSize:9,color:S.t3,flexShrink:0 }}>
                     {new Date(script.created_at).toLocaleString('zh-CN')}
                   </div>
-                </div>
-              </div>
-              
-              {selectedScript?.id === script.id && (
-                <div className="p-4 border-t">
-                  <div className="text-sm text-gray-500 mb-2">脚本内容:</div>
-                  <pre className="bg-gray-50 p-4 rounded overflow-x-auto max-h-96 text-sm">
-                    {script.content}
-                  </pre>
-                </div>
-              )}
-            </div>
-          ))}
+                </button>
+
+                {selected && (
+                  <div style={{ borderTop:`1px solid ${S.bd}`,padding:'16px' }}>
+                    <pre style={{ margin:0,padding:'16px',borderRadius:12,background:'rgba(0,0,0,0.35)',fontFamily:S.mono,fontSize:10,color:S.t2,overflowX:'auto',lineHeight:1.7,maxHeight:500,overflowY:'auto' }}>
+                      {script.content}
+                    </pre>
+                  </div>
+                )}
+              </article>
+            )
+          })}
         </div>
       )}
-    </div>
+    </section>
   )
 }
-
-export default TestScripts

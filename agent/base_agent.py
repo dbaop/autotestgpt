@@ -4,6 +4,7 @@
 
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import litellm
@@ -11,101 +12,80 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
+# 模型优先级配置: (config_key, model_name, api_base)
+_MODEL_PRIORITY = [
+    ('MINIMAX_API_KEY', 'minimax/abab6.5s-chat', 'https://api.minimax.chat/v1'),
+    ('DEEPSEEK_API_KEY', 'deepseek/deepseek-chat', None),
+    ('OPENAI_API_KEY', 'gpt-4', None),
+]
+
+
+def _resolve_llm_config():
+    """按优先级解析可用的 LLM 配置"""
+    for key, model, base in _MODEL_PRIORITY:
+        api_key = getattr(Config, key, None)
+        if api_key:
+            return model, api_key, base
+    return 'deepseek/deepseek-chat', None, None
+
+
 class BaseAgent(ABC):
     """基础智能体类"""
-    
+
     def __init__(self, model: str = "deepseek/deepseek-chat", temperature: float = 0.1):
-        """
-        初始化智能体
-        
-        Args:
-            model: 模型名称
-            temperature: 温度参数
-        """
         self.model = model
         self.temperature = temperature
         self.max_tokens = 4000
-        
+
     def call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> str:
-        """
-        调用大模型
-
-        Args:
-            prompt: 用户提示词
-            system_prompt: 系统提示词
-
-        Returns:
-            模型响应文本
-        """
+        """调用大模型，按优先级自动选择可用的 API"""
         try:
             messages = []
-
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
-
             messages.append({"role": "user", "content": prompt})
 
-            # 优先使用 MiniMax API
-            if Config.MINIMAX_API_KEY:
-                response = litellm.completion(
-                    model="minimax/abab6.5s-chat",
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    api_key=Config.MINIMAX_API_KEY,
-                    api_base="https://api.minimax.chat/v1"
-                )
-            elif Config.DEEPSEEK_API_KEY:
-                response = litellm.completion(
-                    model=self.model,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    api_key=Config.DEEPSEEK_API_KEY
-                )
-            else:
-                response = litellm.completion(
-                    model=self.model,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens
-                )
+            resolved_model, api_key, api_base = _resolve_llm_config()
 
+            kwargs = dict(
+                model=resolved_model,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+            if api_key:
+                kwargs['api_key'] = api_key
+            if api_base:
+                kwargs['api_base'] = api_base
+
+            response = litellm.completion(**kwargs)
             content = response.choices[0].message.content
-            logger.info(f"LLM调用成功，模型: {self.model}, 响应长度: {len(content)}")
-
+            logger.info(f"LLM调用成功，模型: {resolved_model}, 响应长度: {len(content)}")
             return content
 
         except Exception as e:
             logger.error(f"LLM调用失败: {e}")
             raise
-    
+
     def parse_json_response(self, response: str) -> Dict[str, Any]:
-        """
-        解析JSON响应
-        
-        Args:
-            response: 模型响应文本
-            
-        Returns:
-            解析后的JSON字典
-        """
-        try:
-            # 尝试提取JSON部分（模型可能返回带解释的文本）
-            import re
-            
-            # 查找JSON对象
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group()
+        """从 LLM 响应中提取 JSON"""
+        import re
+
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            start = response.find('{')
+            end = response.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                json_str = response[start:end + 1]
             else:
                 json_str = response
-            
-            # 解析JSON
+
+        try:
             return json.loads(json_str)
-            
         except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败: {e}, 响应内容: {response[:200]}...")
+            logger.error(f"JSON解析失败: {e}, 响应内容: {response[:500]}...")
             raise ValueError(f"无法解析模型响应为JSON: {e}")
     
     def save_to_file(self, data: Dict[str, Any], file_path: str):

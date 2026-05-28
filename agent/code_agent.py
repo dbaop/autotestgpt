@@ -1,446 +1,190 @@
-"""
-代码生成智能体
+﻿"""
+Code generation agent.
 """
 
 import json
 import logging
 import os
-from typing import Dict, Any, List
+from datetime import datetime
+from typing import Any, Dict, List
+
 from .base_agent import BaseAgent
 from config import Config
 
 logger = logging.getLogger(__name__)
 
+
 class CodeAgent(BaseAgent):
-    """代码生成智能体"""
-    
+    """Generate executable test scripts from test cases."""
+
     def __init__(self):
         super().__init__(model="deepseek/deepseek-chat", temperature=0.1)
-        self.system_prompt = """你是一个专业的测试代码生成专家。你的任务是根据测试用例生成可执行的自动化测试代码。
+        self.api_test_prompt = (
+            "You are a senior API test automation engineer. "
+            "Return strict JSON with key `scripts` as a list of script objects."
+        )
+        self.ui_test_prompt = (
+            "You are a senior UI automation engineer with Playwright expertise. "
+            "Return strict JSON with key `scripts` as a list of script objects."
+        )
 
-请按照以下JSON格式输出：
+    def build_prompt(self, test_cases: Dict[str, Any]) -> str:
+        test_case_list = test_cases.get("test_cases", [])
+        if not test_case_list:
+            return "Generate one minimal pytest script."
 
-{
-  "scripts": [
-    {
-      "id": "对应测试用例ID",
-      "title": "脚本标题",
-      "description": "脚本描述",
-      "language": "python/javascript",
-      "framework": "pytest/playwright/jest",
-      "code": "完整的测试代码",
-      "dependencies": ["依赖包1", "依赖包2"],
-      "execution_command": "执行命令",
-      "expected_output": "预期输出"
-    }
-  ]
-}
+        prompt_parts: List[str] = [
+            "Generate executable automated test code for the following test cases.",
+            "Return JSON with `scripts`.",
+        ]
 
-对于Python测试代码，请遵循以下规范：
-1. 使用pytest框架
-2. 包含必要的导入语句
-3. 添加详细的注释
-4. 包含断言语句
-5. 处理异常情况
+        for i, tc in enumerate(test_case_list, 1):
+            prompt_parts.append(f"\\n### Test Case {i}")
+            prompt_parts.append(f"ID: {tc.get('id', f'TC-{i}')}")
+            prompt_parts.append(f"Title: {tc.get('title', 'Untitled')}")
+            prompt_parts.append(f"Description: {tc.get('description', '')}")
+            prompt_parts.append(f"Type: {tc.get('test_type', 'api')}")
+            prompt_parts.append(f"Priority: {tc.get('priority', 'medium')}")
 
-对于API测试，使用requests库。
-对于UI测试，使用playwright库。
+            if tc.get("steps"):
+                prompt_parts.append("Steps:")
+                for step in tc["steps"]:
+                    if isinstance(step, dict):
+                        prompt_parts.append(
+                            f"- {step.get('action', '')} -> {step.get('expected', '')}"
+                        )
+                    else:
+                        prompt_parts.append(f"- {step}")
 
-请确保输出是有效的JSON格式，不要包含其他解释性文本。"""
-    
+            if tc.get("test_data"):
+                prompt_parts.append(f"Test data: {tc['test_data']}")
+
+        return "\\n".join(prompt_parts)
+
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        生成测试代码
-        
-        Args:
-            input_data: 包含测试用例的字典
-            
-        Returns:
-            生成的测试脚本
-        """
-        try:
-            # 验证输入
-            if not self.validate_input(input_data, ['test_cases']):
-                raise ValueError("输入数据缺少'test_cases'字段")
-            
-            test_cases = input_data['test_cases']
-            logger.info(f"开始生成测试代码，测试用例数: {len(test_cases.get('test_cases', []))}")
-            
-            # 生成代码
-            scripts = []
-            for test_case in test_cases.get('test_cases', []):
-                script = self.generate_single_script(test_case, test_cases)
-                if script:
-                    scripts.append(script)
-            
-            result = {
-                "scripts": scripts,
-                "metadata": {
-                    'agent': 'CodeAgent',
-                    'model': self.model,
-                    'script_count': len(scripts),
-                    'generated_at': self.get_timestamp()
+        if not self.validate_input(input_data, ["test_cases"]):
+            raise ValueError("input_data missing `test_cases`")
+
+        test_cases = input_data["test_cases"]
+        test_case_list = test_cases.get("test_cases", [])
+
+        has_ui_test = any(
+            str(tc.get("test_type", "")).lower() == "ui" for tc in test_case_list
+        )
+
+        prompt = self.build_prompt(test_cases)
+        system_prompt = self.ui_test_prompt if has_ui_test else self.api_test_prompt
+
+        response = self.call_llm(prompt, system_prompt)
+        payload = self.parse_json_response(response)
+
+        generated_scripts = self._normalize_scripts(payload, default_ui=has_ui_test)
+
+        # Persist generated files without changing in-memory structure.
+        self.save_scripts_to_files({"scripts": generated_scripts})
+
+        result = {
+            "scripts": generated_scripts,
+            "metadata": {
+                "agent": "CodeAgent",
+                "model": self.model,
+                "script_count": len(generated_scripts),
+                "test_type": "ui" if has_ui_test else "api",
+                "generated_at": self.get_timestamp(),
+            },
+        }
+
+        self.log_processing(input_data, result)
+        return result
+
+    def _normalize_scripts(self, payload: Dict[str, Any], default_ui: bool) -> List[Dict[str, Any]]:
+        scripts = payload.get("scripts", [])
+        if not isinstance(scripts, list):
+            scripts = [payload]
+
+        normalized: List[Dict[str, Any]] = []
+        for idx, script in enumerate(scripts, 1):
+            if not isinstance(script, dict):
+                continue
+
+            script_id = str(script.get("id") or f"TC-{idx}")
+            language = script.get("language") or "python"
+            framework = script.get("framework") or ("playwright" if default_ui else "pytest")
+            code = script.get("code") or self._default_code(default_ui, script_id)
+
+            normalized.append(
+                {
+                    "id": script_id,
+                    "title": script.get("title", f"Auto script {script_id}"),
+                    "description": script.get("description", ""),
+                    "language": language,
+                    "framework": framework,
+                    "code": code,
+                    "dependencies": script.get("dependencies", ["pytest"]),
+                    "execution_command": script.get("execution_command", "pytest -q"),
+                    "expected_output": script.get("expected_output", "tests pass"),
                 }
-            }
-            
-            # 记录处理日志
-            self.log_processing(input_data, result)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"代码生成失败: {e}")
-            raise
-    
-    def generate_single_script(self, test_case: Dict[str, Any], all_test_cases: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        生成单个测试脚本
-        
-        Args:
-            test_case: 单个测试用例
-            all_test_cases: 所有测试用例数据
-            
-        Returns:
-            测试脚本
-        """
-        try:
-            test_type = test_case.get('test_type', 'api').lower()
-            
-            # 根据测试类型选择模板
-            if test_type == 'api':
-                return self.generate_api_script(test_case)
-            elif test_type == 'ui':
-                return self.generate_ui_script(test_case)
-            elif test_type == 'performance':
-                return self.generate_performance_script(test_case)
-            elif test_type == 'security':
-                return self.generate_security_script(test_case)
-            else:
-                return self.generate_generic_script(test_case)
-                
-        except Exception as e:
-            logger.error(f"生成测试脚本失败 (ID: {test_case.get('id', 'unknown')}): {e}")
-            # 生成一个默认的脚本结构
-            return {
-                'id': test_case.get('id'),
-                'title': test_case.get('title'),
-                'description': test_case.get('description'),
-                'language': 'python',
-                'framework': 'pytest',
-                'code': 'import pytest\n\ndef test_default():\n    """默认测试"""\n    print("测试执行中...")\n    assert True\n',
-                'dependencies': [],
-                'execution_command': 'pytest',
-                'expected_output': '测试通过',
-                'test_case_title': test_case.get('title'),
-                'test_type': test_case.get('test_type', 'generic')
-            }
-    
-    def generate_api_script(self, test_case: Dict[str, Any]) -> Dict[str, Any]:
-        """生成API测试脚本"""
-        try:
-            prompt = f"""请为以下API测试用例生成Python测试代码：
+            )
 
-测试用例ID: {test_case.get('id')}
-标题: {test_case.get('title')}
-描述: {test_case.get('description')}
-测试步骤: {json.dumps(test_case.get('test_steps', []), ensure_ascii=False)}
-测试数据: {json.dumps(test_case.get('test_data', {}), ensure_ascii=False)}
+        if not normalized:
+            normalized.append(
+                {
+                    "id": "TC-001",
+                    "title": "Fallback generated script",
+                    "description": "Fallback script due to empty LLM response",
+                    "language": "python",
+                    "framework": "playwright" if default_ui else "pytest",
+                    "code": self._default_code(default_ui, "TC-001"),
+                    "dependencies": ["pytest"],
+                    "execution_command": "pytest -q",
+                    "expected_output": "tests pass",
+                }
+            )
 
-要求：
-1. 使用requests库进行HTTP请求
-2. 使用pytest框架
-3. 包含完整的断言
-4. 添加详细的注释
-5. 处理异常情况
-6. 使用环境变量配置基础URL
+        return normalized
 
-请生成可直接执行的测试代码。"""
-        
-            response = self.call_llm(prompt, self.system_prompt)
-            script_data = self.parse_json_response(response)
-            
-            # 确保返回的是单个脚本
-            if 'scripts' in script_data and len(script_data['scripts']) > 0:
-                script = script_data['scripts'][0]
-            else:
-                script = script_data
-            
-            # 添加元数据
-            script['id'] = test_case.get('id')
-            script['test_case_title'] = test_case.get('title')
-            script['test_type'] = 'api'
-            
-            return script
-        except Exception as e:
-            logger.error(f"生成API脚本失败 (ID: {test_case.get('id', 'unknown')}): {e}")
-            # 生成一个默认的脚本结构
-            return {
-                'id': test_case.get('id'),
-                'title': test_case.get('title'),
-                'description': test_case.get('description'),
-                'language': 'python',
-                'framework': 'pytest',
-                'code': 'import pytest\nimport requests\n\ndef test_api():\n    """API测试"""\n    print("测试执行中...")\n    assert True\n',
-                'dependencies': ['requests'],
-                'execution_command': 'pytest',
-                'expected_output': '测试通过',
-                'test_case_title': test_case.get('title'),
-                'test_type': 'api'
-            }
-    
-    def generate_ui_script(self, test_case: Dict[str, Any]) -> Dict[str, Any]:
-        """生成UI测试脚本"""
-        try:
-            prompt = f"""请为以下UI测试用例生成Python测试代码：
+    def _default_code(self, default_ui: bool, script_id: str) -> str:
+        safe_name = script_id.replace("-", "_")
+        if default_ui:
+            return (
+                "from playwright.sync_api import Page\\n\\n"
+                f"def test_{safe_name}(page: Page):\\n"
+                "    page.goto('about:blank')\\n"
+                "    assert page.url is not None\\n"
+            )
+        return (
+            f"def test_{safe_name}():\\n"
+            "    assert True\\n"
+        )
 
-测试用例ID: {test_case.get('id')}
-标题: {test_case.get('title')}
-描述: {test_case.get('description')}
-测试步骤: {json.dumps(test_case.get('test_steps', []), ensure_ascii=False)}
-测试数据: {json.dumps(test_case.get('test_data', {}), ensure_ascii=False)}
-
-要求：
-1. 使用playwright库进行浏览器自动化
-2. 使用pytest框架
-3. 使用Page Object Model设计模式
-4. 包含完整的断言
-5. 添加详细的注释
-6. 处理异常情况
-7. 支持headless模式
-
-请生成可直接执行的测试代码。"""
-        
-            response = self.call_llm(prompt, self.system_prompt)
-            script_data = self.parse_json_response(response)
-            
-            # 确保返回的是单个脚本
-            if 'scripts' in script_data and len(script_data['scripts']) > 0:
-                script = script_data['scripts'][0]
-            else:
-                script = script_data
-            
-            # 添加元数据
-            script['id'] = test_case.get('id')
-            script['test_case_title'] = test_case.get('title')
-            script['test_type'] = 'ui'
-            
-            return script
-        except Exception as e:
-            logger.error(f"生成UI脚本失败 (ID: {test_case.get('id', 'unknown')}): {e}")
-            # 生成一个默认的脚本结构
-            return {
-                'id': test_case.get('id'),
-                'title': test_case.get('title'),
-                'description': test_case.get('description'),
-                'language': 'python',
-                'framework': 'pytest-playwright',
-                'code': 'import pytest\nfrom playwright.sync_api import Page\n\ndef test_ui(page: Page):\n    """测试UI"""\n    print("UI测试执行中...")\n    assert True\n',
-                'dependencies': ['playwright'],
-                'execution_command': 'pytest',
-                'expected_output': '测试通过',
-                'test_case_title': test_case.get('title'),
-                'test_type': 'ui'
-            }
-    
-    def generate_performance_script(self, test_case: Dict[str, Any]) -> Dict[str, Any]:
-        """生成性能测试脚本"""
-        try:
-            prompt = f"""请为以下性能测试用例生成Python测试代码：
-
-测试用例ID: {test_case.get('id')}
-标题: {test_case.get('title')}
-描述: {test_case.get('description')}
-测试步骤: {json.dumps(test_case.get('test_steps', []), ensure_ascii=False)}
-
-要求：
-1. 使用locust或pytest-benchmark库
-2. 模拟并发用户
-3. 测量响应时间
-4. 生成性能报告
-5. 包含性能断言（如响应时间阈值）
-
-请生成可直接执行的性能测试代码。"""
-        
-            response = self.call_llm(prompt, self.system_prompt)
-            script_data = self.parse_json_response(response)
-            
-            # 确保返回的是单个脚本
-            if 'scripts' in script_data and len(script_data['scripts']) > 0:
-                script = script_data['scripts'][0]
-            else:
-                script = script_data
-            
-            # 添加元数据
-            script['id'] = test_case.get('id')
-            script['test_case_title'] = test_case.get('title')
-            script['test_type'] = 'performance'
-            
-            return script
-        except Exception as e:
-            logger.error(f"生成性能脚本失败 (ID: {test_case.get('id', 'unknown')}): {e}")
-            # 生成一个默认的脚本结构
-            return {
-                'id': test_case.get('id'),
-                'title': test_case.get('title'),
-                'description': test_case.get('description'),
-                'language': 'python',
-                'framework': 'locust',
-                'code': 'from locust import HttpUser, task, between\n\nclass PerformanceUser(HttpUser):\n    wait_time = between(1, 3)\n    \n    @task\n    def test_performance(self):\n        """性能测试"""\n        self.client.get("/")\n',
-                'dependencies': ['locust'],
-                'execution_command': 'locust',
-                'expected_output': '性能测试完成',
-                'test_case_title': test_case.get('title'),
-                'test_type': 'performance'
-            }
-    
-    def generate_security_script(self, test_case: Dict[str, Any]) -> Dict[str, Any]:
-        """生成安全测试脚本"""
-        try:
-            prompt = f"""请为以下安全测试用例生成Python测试代码：
-
-测试用例ID: {test_case.get('id')}
-标题: {test_case.get('title')}
-描述: {test_case.get('description')}
-测试步骤: {json.dumps(test_case.get('test_steps', []), ensure_ascii=False)}
-
-要求：
-1. 测试常见安全漏洞（如SQL注入、XSS、CSRF等）
-2. 使用requests库发送恶意请求
-3. 验证安全防护机制
-4. 包含安全断言
-
-请生成可直接执行的安全测试代码。"""
-        
-            response = self.call_llm(prompt, self.system_prompt)
-            script_data = self.parse_json_response(response)
-            
-            # 确保返回的是单个脚本
-            if 'scripts' in script_data and len(script_data['scripts']) > 0:
-                script = script_data['scripts'][0]
-            else:
-                script = script_data
-            
-            # 添加元数据
-            script['id'] = test_case.get('id')
-            script['test_case_title'] = test_case.get('title')
-            script['test_type'] = 'security'
-            
-            return script
-        except Exception as e:
-            logger.error(f"生成安全脚本失败 (ID: {test_case.get('id', 'unknown')}): {e}")
-            # 生成一个默认的脚本结构
-            return {
-                'id': test_case.get('id'),
-                'title': test_case.get('title'),
-                'description': test_case.get('description'),
-                'language': 'python',
-                'framework': 'pytest',
-                'code': 'import pytest\nimport requests\n\ndef test_security():\n    """安全测试"""\n    print("安全测试执行中...")\n    assert True\n',
-                'dependencies': ['requests'],
-                'execution_command': 'pytest',
-                'expected_output': '测试通过',
-                'test_case_title': test_case.get('title'),
-                'test_type': 'security'
-            }
-    
-    def generate_generic_script(self, test_case: Dict[str, Any]) -> Dict[str, Any]:
-        """生成通用测试脚本"""
-        try:
-            prompt = f"""请为以下测试用例生成Python测试代码：
-
-测试用例ID: {test_case.get('id')}
-标题: {test_case.get('title')}
-描述: {test_case.get('description')}
-测试步骤: {json.dumps(test_case.get('test_steps', []), ensure_ascii=False)}
-测试数据: {json.dumps(test_case.get('test_data', {}), ensure_ascii=False)}
-
-要求：
-1. 使用pytest框架
-2. 包含完整的断言
-3. 添加详细的注释
-4. 处理异常情况
-
-请生成可直接执行的测试代码。"""
-        
-            response = self.call_llm(prompt, self.system_prompt)
-            script_data = self.parse_json_response(response)
-            
-            # 确保返回的是单个脚本
-            if 'scripts' in script_data and len(script_data['scripts']) > 0:
-                script = script_data['scripts'][0]
-            else:
-                script = script_data
-            
-            # 添加元数据
-            script['id'] = test_case.get('id')
-            script['test_case_title'] = test_case.get('title')
-            script['test_type'] = test_case.get('test_type', 'generic')
-            
-            return script
-        except Exception as e:
-            logger.error(f"生成通用脚本失败 (ID: {test_case.get('id', 'unknown')}): {e}")
-            # 生成一个默认的脚本结构
-            return {
-                'id': test_case.get('id'),
-                'title': test_case.get('title'),
-                'description': test_case.get('description'),
-                'language': 'python',
-                'framework': 'pytest',
-                'code': 'import pytest\n\ndef test_generic():\n    """通用测试"""\n    print("测试执行中...")\n    assert True\n',
-                'dependencies': [],
-                'execution_command': 'pytest',
-                'expected_output': '测试通过',
-                'test_case_title': test_case.get('title'),
-                'test_type': test_case.get('test_type', 'generic')
-            }
-    
     def save_scripts_to_files(self, scripts_data: Dict[str, Any], base_dir: str = None):
-        """
-        保存脚本到文件
-        
-        Args:
-            scripts_data: 脚本数据
-            base_dir: 基础目录
-        """
         if base_dir is None:
-            base_dir = os.path.join(Config.WORKSPACE, 'scripts')
-        
+            base_dir = os.path.join(Config.WORKSPACE, "scripts")
+
         os.makedirs(base_dir, exist_ok=True)
-        
-        saved_files = []
-        for script in scripts_data.get('scripts', []):
+
+        saved_files: List[str] = []
+        for script in scripts_data.get("scripts", []):
             try:
-                # 生成文件名
-                script_id = script.get('id', 'unknown').replace('/', '_').replace('\\', '_')
-                language = script.get('language', 'python')
-                
-                if language == 'python':
-                    ext = '.py'
-                elif language == 'javascript':
-                    ext = '.js'
-                else:
-                    ext = '.txt'
-                
+                script_id = str(script.get("id", "unknown")).replace("/", "_").replace("\\\\", "_")
+                language = script.get("language", "python")
+                ext = ".py" if language == "python" else ".js" if language == "javascript" else ".txt"
+
                 filename = f"test_{script_id}{ext}"
                 filepath = os.path.join(base_dir, filename)
-                
-                # 保存代码
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(script.get('code', ''))
-                
-                # 更新脚本信息
-                script['file_path'] = filepath
-                script['filename'] = filename
-                
+
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(script.get("code", ""))
+
+                script["file_path"] = filepath
+                script["filename"] = filename
+
                 saved_files.append(filepath)
-                logger.info(f"脚本已保存: {filepath}")
-                
+                logger.info(f"script saved: {filepath}")
             except Exception as e:
-                logger.error(f"保存脚本失败 (ID: {script.get('id', 'unknown')}): {e}")
-        
+                logger.error(f"failed to save script {script.get('id', 'unknown')}: {e}")
+
         return saved_files
-    
+
     def get_timestamp(self):
-        """获取时间戳"""
-        from datetime import datetime
         return datetime.utcnow().isoformat()

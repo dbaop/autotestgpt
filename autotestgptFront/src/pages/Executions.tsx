@@ -1,146 +1,193 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { executionsApi, ExecutionRecord } from '../api'
 
+const S = {
+  bg: 'var(--bg-card)',
+  bgElevated: 'var(--bg-elevated)',
+  bd: 'var(--border-subtle)',
+  cyan: 'var(--accent-cyan)',
+  violet: 'var(--accent-violet)',
+  magenta: 'var(--accent-magenta)',
+  emerald: 'var(--accent-emerald)',
+  amber: 'var(--accent-amber)',
+  rose: 'var(--accent-magenta)',
+  text: 'var(--text-primary)',
+  text2: 'var(--text-secondary)',
+  text3: 'var(--text-muted)',
+  mono: 'var(--font-mono)',
+  display: 'var(--font-display)',
+  body: 'var(--font-body)',
+}
+
+const FILTERS = ['all', 'success', 'failed', 'error', 'running'] as const
+
+const STATUS_COLORS: Record<string, { color: string; bg: string; label: string }> = {
+  success: { color: 'var(--accent-emerald)', bg: 'rgba(0,255,136,0.12)', label: 'SUCCESS' },
+  failed: { color: 'var(--accent-amber)', bg: 'rgba(255,176,32,0.12)', label: 'FAILED' },
+  error: { color: 'var(--accent-magenta)', bg: 'rgba(255,45,120,0.12)', label: 'ERROR' },
+  running: { color: '#38bdf8', bg: 'rgba(56,189,248,0.12)', label: 'RUNNING' },
+}
+
+function StatBox({ label, value, color, icon, delay }: { label: string; value: string | number; color: string; icon: string; delay: number }) {
+  return (
+    <div className="animate-float-up card-hover" style={{
+      background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: 18,
+      padding: '22px 20px', position: 'relative', overflow: 'hidden', animationDelay: `${delay}s`,
+    }}>
+      <div style={{
+        position: 'absolute', top: 0, right: 0, width: 60, height: 60,
+        background: `radial-gradient(circle, ${color}12 0%, transparent 70%)`,
+        transform: 'translate(15%, -15%)',
+      }} />
+      <div style={{ fontFamily: S.mono, fontSize: 10, fontWeight: 600, letterSpacing: '0.16em', color: S.text3, textTransform: 'uppercase', marginBottom: 10 }}>
+        {label}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ fontFamily: S.display, fontSize: 32, fontWeight: 800, color: color }}>
+          {value}
+        </div>
+        <div style={{
+          width: 40, height: 40, borderRadius: 10, background: `${color}15`,
+          border: `1px solid ${color}30`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16,
+        }}>
+          {icon}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function FilterButton({ label, active, onClick, color }: { label: string; active: boolean; onClick: () => void; color: string }) {
+  return (
+    <button onClick={onClick} style={{
+      fontFamily: S.mono, fontSize: 10, fontWeight: 600, padding: '7px 16px', borderRadius: 100,
+      border: `1px solid ${active ? color : 'var(--border-default)'}`,
+      color: active ? color : 'var(--text-muted)',
+      background: active ? `${color}12` : 'transparent',
+      cursor: 'pointer', transition: 'all 0.2s ease', letterSpacing: '0.1em',
+    }}>
+      {label}
+    </button>
+  )
+}
+
 export default function Executions() {
-  const [executions, setExecutions] = useState<ExecutionRecord[]>([])
+  const [items, setItems] = useState<ExecutionRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState<string>('all')
 
   useEffect(() => {
-    executionsApi.list()
-      .then(res => setExecutions(res.data.items || []))
-      .catch(err => console.error('Failed to load executions:', err))
-      .finally(() => setLoading(false))
+    executionsApi.list().then(r => setItems(r.data.items || [])).catch(console.error).finally(() => setLoading(false))
   }, [])
 
-  const filteredExecutions = filter === 'all'
-    ? executions
-    : executions.filter(e => e.status === filter)
+  const filtered = useMemo(() => filter === 'all' ? items : items.filter(i => i.status === filter), [items, filter])
 
-  const stats = {
-    total: executions.length,
-    passed: executions.filter(e => e.status === 'passed').length,
-    failed: executions.filter(e => e.status === 'failed').length,
-    error: executions.filter(e => e.status === 'error').length
-  }
+  const stats = useMemo(() => ({
+    total: items.length,
+    success: items.filter(i => i.status === 'success').length,
+    failed: items.filter(i => i.status === 'failed').length,
+    error: items.filter(i => i.status === 'error').length,
+  }), [items])
 
-  if (loading) {
-    return <div className="text-center py-8 text-gray-500">加载中...</div>
-  }
+  if (loading) return (
+    <div style={{ textAlign: 'center', padding: 80, color: S.text3, fontFamily: S.mono, fontSize: 13 }}>
+      <div style={{ display: 'inline-block', animation: 'spin-slow 1s linear infinite', fontSize: 24 }}>○</div>
+      <div style={{ marginTop: 16 }}>加载执行记录中...</div>
+    </div>
+  )
 
   return (
-    <div>
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">执行记录</h2>
+    <div className="page-stack animate-fade-in">
+      {/* Header */}
+      <section className="gradient-border-card panel-inner">
+        <div style={{ fontFamily: S.mono, fontSize: 11, letterSpacing: '0.32em', color: 'var(--accent-amber)', textTransform: 'uppercase', marginBottom: 10 }}>
+          &gt; execution_ledger
+        </div>
+        <h2 style={{ fontFamily: S.display, fontSize: 32, fontWeight: 800, color: S.text, margin: '0 0 8px', letterSpacing: '-0.01em' }}>
+          执行记录
+        </h2>
+        <p style={{ fontFamily: S.body, fontSize: 14, color: S.text2, margin: '0 0 28px' }}>
+          API / UI 执行器的结果记录
+        </p>
 
-      {/* Stats */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        <StatCard label="总执行" value={stats.total} color="gray" />
-        <StatCard label="通过" value={stats.passed} color="green" />
-        <StatCard label="失败" value={stats.failed} color="red" />
-        <StatCard label="错误" value={stats.error} color="orange" />
-      </div>
+        {/* Stats */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 28 }} className="stagger-children">
+          <StatBox label="total" value={stats.total} color={S.text2} icon="◎" delay={0} />
+          <StatBox label="success" value={stats.success} color="var(--accent-emerald)" icon="✓" delay={1} />
+          <StatBox label="failed" value={stats.failed} color="var(--accent-amber)" icon="✗" delay={2} />
+          <StatBox label="error" value={stats.error} color="var(--accent-magenta)" icon="!" delay={3} />
+        </div>
 
-      {/* Filter */}
-      <div className="flex gap-2 mb-6">
-        {['all', 'passed', 'failed', 'error'].map(status => (
-          <button
-            key={status}
-            onClick={() => setFilter(status)}
-            className={`px-3 py-1.5 rounded-full text-sm ${
-              filter === status
-                ? 'bg-indigo-600 text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-            }`}
-          >
-            {status === 'all' ? '全部' :
-             status === 'passed' ? '通过' :
-             status === 'failed' ? '失败' : '错误'}
-          </button>
-        ))}
-      </div>
+        {/* Filters */}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {FILTERS.map(f => (
+            <FilterButton key={f} label={f === 'all' ? 'ALL' : f.toUpperCase()} active={filter === f} onClick={() => setFilter(f)}
+              color={STATUS_COLORS[f]?.color || S.text2} />
+          ))}
+        </div>
+      </section>
 
       {/* Table */}
-      <div className="bg-white rounded-lg shadow overflow-hidden">
-        {filteredExecutions.length === 0 ? (
-          <div className="p-8 text-center text-gray-500">暂无执行记录</div>
-        ) : (
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+      {!filtered.length ? (
+        <div className="gradient-border-card panel-inner" style={{
+          textAlign: 'center', padding: 64, fontFamily: S.mono, fontSize: 13, color: S.text3,
+        }}>
+          暂无执行记录
+        </div>
+      ) : (
+        <div className="gradient-border-card data-table-wrap">
+          <table className="data-table">
+            <thead>
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  ID
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  状态
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  执行时间
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  开始时间
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  错误信息
-                </th>
+                {['ID', 'STATUS', 'TIME', 'STARTED', 'ERROR'].map(l => (
+                  <th key={l}>{l}</th>
+                ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
-              {filteredExecutions.map(exec => (
-                <tr key={exec.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 text-gray-900 font-medium">
-                    #{exec.id}
-                  </td>
-                  <td className="px-6 py-4">
-                    <StatusBadge status={exec.status} />
-                  </td>
-                  <td className="px-6 py-4 text-gray-500">
-                    {exec.execution_time ? `${exec.execution_time.toFixed(2)}s` : '-'}
-                  </td>
-                  <td className="px-6 py-4 text-gray-500 text-sm">
-                    {new Date(exec.started_at).toLocaleString('zh-CN')}
-                  </td>
-                  <td className="px-6 py-4 text-red-500 text-sm max-w-md truncate">
-                    {exec.error_message || '-'}
-                  </td>
-                </tr>
-              ))}
+            <tbody>
+              {filtered.map((ex, i) => {
+                const statusStyle = STATUS_COLORS[ex.status] || { color: S.text3, bg: 'rgba(255,255,255,0.05)', label: ex.status?.toUpperCase() }
+                return (
+                  <tr key={ex.id} className="animate-float-up" style={{
+                    animationDelay: `${i * 0.02}s`, transition: 'background 0.2s',
+                  }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                    <td>
+                      <span style={{ fontFamily: S.mono, fontSize: 14, fontWeight: 700, color: S.text }}>
+                        #{ex.id}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={`status-badge ${ex.status}`} style={{ color: statusStyle.color, background: statusStyle.bg }}>
+                        {statusStyle.label}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{ fontFamily: S.mono, fontSize: 12, color: S.text2 }}>
+                        {ex.execution_time ? `${ex.execution_time.toFixed(2)}s` : '--'}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{ fontFamily: S.mono, fontSize: 11, color: S.text3 }}>
+                        {ex.started_at ? new Date(ex.started_at).toLocaleString('zh-CN') : '--'}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{
+                        fontFamily: S.mono, fontSize: 11, color: 'var(--accent-magenta)',
+                        maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block',
+                      }}>
+                        {ex.error_message || '--'}
+                      </span>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
-        )}
-      </div>
+        </div>
+      )}
     </div>
-  )
-}
-
-function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
-  const colorMap: Record<string, string> = {
-    gray: 'bg-gray-100 text-gray-800',
-    green: 'bg-green-100 text-green-800',
-    red: 'bg-red-100 text-red-800',
-    orange: 'bg-orange-100 text-orange-800'
-  }
-
-  return (
-    <div className={`rounded-lg p-4 ${colorMap[color]}`}>
-      <div className="text-sm">{label}</div>
-      <div className="text-2xl font-bold">{value}</div>
-    </div>
-  )
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const statusMap: Record<string, { bg: string, text: string, label: string }> = {
-    passed: { bg: 'bg-green-100', text: 'text-green-800', label: '通过' },
-    failed: { bg: 'bg-red-100', text: 'text-red-800', label: '失败' },
-    error: { bg: 'bg-orange-100', text: 'text-orange-800', label: '错误' },
-    running: { bg: 'bg-blue-100', text: 'text-blue-800', label: '运行中' }
-  }
-
-  const s = statusMap[status] || statusMap.error
-
-  return (
-    <span className={`px-2 py-1 rounded-full text-xs font-medium ${s.bg} ${s.text}`}>
-      {s.label}
-    </span>
   )
 }

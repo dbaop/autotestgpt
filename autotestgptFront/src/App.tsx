@@ -7,6 +7,8 @@ import TestCases from './pages/TestCases'
 import Executions from './pages/Executions'
 import RequirementDetail from './pages/RequirementDetail'
 import Chat from './pages/Chat'
+import CodeReviews from './pages/CodeReviews'
+import KnowledgeBases from './pages/KnowledgeBases'
 
 export default function App() {
   return (
@@ -15,6 +17,8 @@ export default function App() {
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="new" element={<NewTest />} />
+          <Route path="reviews" element={<CodeReviews />} />
+          <Route path="knowledge-bases" element={<KnowledgeBases />} />
           <Route path="requirements" element={<Requirements />} />
           <Route path="requirements/:id" element={<RequirementDetail />} />
           <Route path="cases" element={<TestCases />} />

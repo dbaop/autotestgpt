@@ -3,7 +3,8 @@
     "allow": [
       "Bash(npx tsc:*)",
       "Skill(agent-browser)",
-      "Skill(agent-browser:*)"
+      "Skill(agent-browser:*)",
+      "Bash(python -c ':*)"
     ]
   }
 }

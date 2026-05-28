@@ -1,36 +1,39 @@
 """
-测试用例设计智能体
+Test case design agent.
 """
 
-import json
 import logging
-from typing import Dict, Any, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 from .base_agent import BaseAgent
+from models import db, Requirement, TestCase, TestSuite
+from service.knowledge_service import knowledge_service
 
 logger = logging.getLogger(__name__)
 
+
 class CaseAgent(BaseAgent):
-    """测试用例设计智能体"""
-    
+    """Generate or reuse test cases from structured requirements."""
+
     def __init__(self):
         super().__init__(model="gpt-4", temperature=0.1)
-        self.system_prompt = """你是一个专业的测试用例设计师。你的任务是根据结构化需求设计详细的测试用例。
-
-请按照以下JSON格式输出测试用例：
-
+        self.system_prompt = """你是专业的测试用例设计师。
+必须使用中文输出测试用例内容，包括 title、description、preconditions、test_steps.action、test_steps.expected、test_data.expected_output 和 tags。
+只返回合法 JSON，字段名保持英文，格式如下：
 {
   "test_cases": [
     {
       "id": "TC-001",
-      "title": "测试用例标题",
-      "description": "测试用例描述",
+      "title": "用例标题",
+      "description": "用例描述",
       "test_type": "api/ui/performance/security",
       "priority": "high/medium/low",
-      "preconditions": ["前置条件1", "前置条件2"],
+      "preconditions": ["前置条件 1"],
       "test_steps": [
         {
           "step": 1,
-          "action": "操作描述",
+          "action": "执行操作",
           "expected": "预期结果"
         }
       ],
@@ -41,214 +44,249 @@ class CaseAgent(BaseAgent):
       "tags": ["标签1", "标签2"]
     }
   ]
-}
+}"""
 
-请确保输出是有效的JSON格式，不要包含其他解释性文本。"""
-    
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        设计测试用例
-        
-        Args:
-            input_data: 包含结构化需求的字典
-            
-        Returns:
-            测试用例数据
-        """
+        if not self.validate_input(input_data, ["structured_req"]):
+            raise ValueError("Missing required field: structured_req")
+
+        structured_req = input_data["structured_req"]
+        requirement_id = input_data.get("requirement_id")
+
+        reusable_suite = self.find_reusable_suite(structured_req)
+        if reusable_suite and requirement_id:
+            logger.info("Reusing existing test suite %s", reusable_suite.id)
+            return self.reuse_test_suite(reusable_suite, requirement_id)
+
+        knowledge_context = self.get_knowledge_context(structured_req, requirement_id)
+        prompt = self.build_prompt(structured_req, knowledge_context.get("prompt_text"))
+        response = self.call_llm(prompt, self.system_prompt)
+        test_cases = self.parse_test_case_response(response)
+        test_suite = self.create_test_suite(structured_req, test_cases)
+
+        test_cases["metadata"] = {
+            "agent": "CaseAgent",
+            "model": self.model,
+            "requirement_title": structured_req.get("title", "Unknown"),
+            "test_case_count": len(test_cases.get("test_cases", [])),
+            "generated_at": self.get_timestamp(),
+            "test_suite_id": test_suite.id if test_suite else None,
+            "knowledge_entry_count": len(knowledge_context.get("items", [])),
+            "knowledge_entries": knowledge_context.get("items", []),
+        }
+
+        self.log_processing(input_data, test_cases)
+        return test_cases
+
+    def parse_test_case_response(self, response: str) -> Dict[str, Any]:
+        import json
+        import re
+
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            start = response.find('{')
+            end = response.rfind('}')
+            json_str = response[start:end + 1] if start != -1 and end != -1 and end > start else response
+
+        parsed = json.loads(json_str)
+        if "test_cases" in parsed:
+            return parsed
+        if "scripts" in parsed:
+            raise ValueError("LLM returned scripts instead of test cases")
+        return {"test_cases": [parsed]}
+
+    def get_knowledge_context(self, structured_req: Dict[str, Any], requirement_id: Optional[int]) -> Dict[str, Any]:
+        knowledge_base_ids: List[int] = []
+        if requirement_id:
+            requirement = db.session.get(Requirement, requirement_id)
+            if requirement and requirement.knowledge_base_id:
+                knowledge_base_ids.append(requirement.knowledge_base_id)
+
+        return knowledge_service.build_case_context(
+            structured_req,
+            knowledge_base_ids=knowledge_base_ids or None,
+            limit=3,
+        )
+
+    def find_reusable_suite(self, structured_req: Dict[str, Any]) -> Optional[TestSuite]:
+        keywords = self.extract_keywords(structured_req)
+        reusable_suites = TestSuite.query.filter_by(is_reusable=True).all()
+
+        best_match = None
+        best_match_count = 0
+
+        for suite in reusable_suites:
+            suite_tags = suite.tags or []
+            suite_pattern = suite.requirement_pattern or ""
+            match_count = 0
+
+            for keyword in keywords:
+                if keyword in suite_tags or keyword.lower() in suite_pattern.lower():
+                    match_count += 1
+
+            title = structured_req.get("title", "").lower()
+            if title and title in suite_pattern.lower():
+                match_count += 2
+
+            if match_count > best_match_count and match_count >= 2:
+                best_match_count = match_count
+                best_match = suite
+
+        return best_match
+
+    def extract_keywords(self, structured_req: Dict[str, Any]) -> List[str]:
+        keywords: List[str] = []
+
+        title = structured_req.get("title", "")
+        if title:
+            keywords.extend([part.strip() for part in title.replace("/", " ").split() if len(part.strip()) > 1])
+
+        for module in structured_req.get("business_modules", []):
+            name = module.get("name", "")
+            if name:
+                keywords.append(name)
+
+        for interface in structured_req.get("interfaces", []):
+            endpoint = interface.get("endpoint", "")
+            if endpoint:
+                parts = endpoint.strip("/").split("/")
+                keywords.extend([part for part in parts if len(part) > 1 and not part.startswith(":")])
+
+        deduped: List[str] = []
+        for keyword in keywords:
+            if keyword and keyword not in deduped:
+                deduped.append(keyword)
+        return deduped
+
+    def create_test_suite(self, structured_req: Dict[str, Any], test_cases: Dict[str, Any]) -> Optional[TestSuite]:
         try:
-            # 验证输入
-            if not self.validate_input(input_data, ['structured_req']):
-                raise ValueError("输入数据缺少'structured_req'字段")
-            
-            structured_req = input_data['structured_req']
-            logger.info(f"开始设计测试用例，需求模块数: {len(structured_req.get('business_modules', []))}")
-            
-            # 构建提示词
-            prompt = self.build_prompt(structured_req)
-            
-            # 调用大模型
-            response = self.call_llm(prompt, self.system_prompt)
-            
-            # 解析JSON响应
-            test_cases = self.parse_json_response(response)
-            
-            # 添加元数据
-            test_cases['metadata'] = {
-                'agent': 'CaseAgent',
-                'model': self.model,
-                'requirement_title': structured_req.get('title', '未知'),
-                'test_case_count': len(test_cases.get('test_cases', [])),
-                'generated_at': self.get_timestamp()
+            keywords = self.extract_keywords(structured_req)
+            requirement_pattern = structured_req.get("title", "")
+            if structured_req.get("description"):
+                requirement_pattern = f"{requirement_pattern} {structured_req.get('description', '')}".strip()
+
+            suite = TestSuite(
+                name=f"Suite - {structured_req.get('title', 'Untitled')[:50]}",
+                description=f"Generated from requirement: {structured_req.get('title', '')}",
+                tags=keywords,
+                requirement_pattern=requirement_pattern[:500],
+                is_reusable=True,
+                usage_count=0,
+            )
+            db.session.add(suite)
+            db.session.commit()
+            return suite
+        except Exception as exc:
+            logger.error("Failed to create test suite: %s", exc)
+            db.session.rollback()
+            return None
+
+    def reuse_test_suite(self, test_suite: TestSuite, requirement_id: int) -> Dict[str, Any]:
+        try:
+            test_suite.usage_count += 1
+            db.session.commit()
+
+            new_cases = []
+            for case in test_suite.test_cases:
+                cloned_case = TestCase(
+                    requirement_id=requirement_id,
+                    test_suite_id=test_suite.id,
+                    title=case.title,
+                    description=case.description,
+                    test_type=case.test_type,
+                    priority=case.priority,
+                    steps=case.steps,
+                    expected_results=case.expected_results,
+                )
+                db.session.add(cloned_case)
+                new_cases.append(
+                    {
+                        "id": case.id,
+                        "title": case.title,
+                        "description": case.description,
+                        "test_type": case.test_type,
+                        "priority": case.priority,
+                        "steps": case.steps,
+                        "expected_results": case.expected_results,
+                        "reused": True,
+                        "original_case_id": case.id,
+                    }
+                )
+
+            db.session.commit()
+            return {
+                "test_cases": new_cases,
+                "metadata": {
+                    "agent": "CaseAgent",
+                    "model": self.model,
+                    "test_case_count": len(new_cases),
+                    "reused": True,
+                    "test_suite_id": test_suite.id,
+                    "test_suite_name": test_suite.name,
+                    "usage_count": test_suite.usage_count,
+                    "knowledge_entry_count": 0,
+                    "knowledge_entries": [],
+                },
             }
-            
-            # 记录处理日志
-            self.log_processing(input_data, test_cases)
-            
-            return test_cases
-            
-        except Exception as e:
-            logger.error(f"测试用例设计失败: {e}")
+        except Exception as exc:
+            logger.error("Failed to reuse test suite: %s", exc)
+            db.session.rollback()
             raise
-    
-    def build_prompt(self, structured_req: Dict[str, Any]) -> str:
-        """
-        构建提示词
-        
-        Args:
-            structured_req: 结构化需求
-            
-        Returns:
-            提示词文本
-        """
-        prompt_parts = []
-        
-        # 添加需求基本信息
-        prompt_parts.append(f"需求标题: {structured_req.get('title', '未指定')}")
-        prompt_parts.append(f"需求描述: {structured_req.get('description', '未指定')}")
-        
-        # 添加业务模块
-        business_modules = structured_req.get('business_modules', [])
+
+    def build_prompt(self, structured_req: Dict[str, Any], knowledge_prompt: Optional[str] = None) -> str:
+        prompt_parts: List[str] = []
+        prompt_parts.append(f"Requirement title: {structured_req.get('title', 'Unknown')}")
+        prompt_parts.append(f"Requirement description: {structured_req.get('description', 'Unknown')}")
+
+        business_modules = structured_req.get("business_modules", [])
         if business_modules:
-            prompt_parts.append("\n业务模块:")
+            prompt_parts.append("\nBusiness modules:")
             for module in business_modules:
-                prompt_parts.append(f"  - {module.get('name')} ({module.get('priority')}): {module.get('description')}")
-        
-        # 添加接口
-        interfaces = structured_req.get('interfaces', [])
+                prompt_parts.append(
+                    f"  - {module.get('name')} ({module.get('priority')}): {module.get('description')}"
+                )
+
+        interfaces = structured_req.get("interfaces", [])
         if interfaces:
-            prompt_parts.append("\n接口列表:")
+            prompt_parts.append("\nInterfaces:")
             for interface in interfaces:
-                prompt_parts.append(f"  - {interface.get('method')} {interface.get('endpoint')}: {interface.get('description')}")
-        
-        # 添加UI元素
-        ui_elements = structured_req.get('ui_elements', [])
+                prompt_parts.append(
+                    f"  - {interface.get('method')} {interface.get('endpoint')}: {interface.get('description')}"
+                )
+
+        ui_elements = structured_req.get("ui_elements", [])
         if ui_elements:
-            prompt_parts.append("\nUI元素:")
+            prompt_parts.append("\nUI elements:")
             for element in ui_elements:
-                prompt_parts.append(f"  - {element.get('type')} '{element.get('name')}': {element.get('description')}")
-        
-        # 添加测试点
-        test_points = structured_req.get('test_points', [])
+                prompt_parts.append(
+                    f"  - {element.get('type')} {element.get('name')}: {element.get('description')}"
+                )
+
+        test_points = structured_req.get("test_points", [])
         if test_points:
-            prompt_parts.append("\n测试点:")
+            prompt_parts.append("\nTest points:")
             for point in test_points:
-                prompt_parts.append(f"  - {point.get('id')} ({point.get('type')}, {point.get('priority')}): {point.get('description')}")
-        
-        # 添加测试场景
-        test_scenarios = structured_req.get('test_scenarios', [])
+                prompt_parts.append(
+                    f"  - {point.get('id')} ({point.get('type')}, {point.get('priority')}): {point.get('description')}"
+                )
+
+        test_scenarios = structured_req.get("test_scenarios", [])
         if test_scenarios:
-            prompt_parts.append("\n测试场景:")
+            prompt_parts.append("\nTest scenarios:")
             for scenario in test_scenarios:
                 prompt_parts.append(f"  - {scenario.get('name')}: {scenario.get('description')}")
-        
-        # 添加指令
-        prompt_parts.append("\n请根据以上需求设计详细的测试用例。")
-        prompt_parts.append("请确保测试用例覆盖所有业务模块、接口和测试点。")
-        prompt_parts.append("为每个测试用例指定合适的测试类型（api/ui/performance/security）和优先级。")
-        
+
+        if knowledge_prompt:
+            prompt_parts.append(f"\n{knowledge_prompt}")
+
+        prompt_parts.append("\n请为上述需求设计详细测试用例。")
+        prompt_parts.append("必须使用中文描述测试用例内容，字段名保持 JSON 约定。")
+        prompt_parts.append("覆盖业务模块、接口、页面元素和重要风险场景。")
+        prompt_parts.append("优先输出可落地的用例，包含正常路径和异常路径校验。")
+
         return "\n".join(prompt_parts)
-    
-    def get_timestamp(self):
-        """获取时间戳"""
-        from datetime import datetime
+
+    def get_timestamp(self) -> str:
         return datetime.utcnow().isoformat()
-    
-    def categorize_test_cases(self, test_cases: List[Dict[str, Any]]) -> Dict[str, List]:
-        """
-        分类测试用例
-        
-        Args:
-            test_cases: 测试用例列表
-            
-        Returns:
-            分类后的测试用例
-        """
-        categories = {
-            'api': [],
-            'ui': [],
-            'performance': [],
-            'security': [],
-            'other': []
-        }
-        
-        for test_case in test_cases:
-            test_type = test_case.get('test_type', 'other').lower()
-            
-            if test_type in categories:
-                categories[test_type].append(test_case)
-            else:
-                categories['other'].append(test_case)
-        
-        return categories
-    
-    def calculate_coverage(self, test_cases: List[Dict[str, Any]], structured_req: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        计算测试覆盖率
-        
-        Args:
-            test_cases: 测试用例列表
-            structured_req: 结构化需求
-            
-        Returns:
-            覆盖率统计
-        """
-        try:
-            # 统计需求元素
-            total_elements = (
-                len(structured_req.get('business_modules', [])) +
-                len(structured_req.get('interfaces', [])) +
-                len(structured_req.get('ui_elements', [])) +
-                len(structured_req.get('test_points', []))
-            )
-            
-            if total_elements == 0:
-                return {'coverage_percentage': 0, 'covered_elements': 0, 'total_elements': 0}
-            
-            # 简单估算：每个测试用例覆盖1个元素
-            covered_elements = min(len(test_cases), total_elements)
-            coverage_percentage = round((covered_elements / total_elements) * 100, 1)
-            
-            return {
-                'coverage_percentage': coverage_percentage,
-                'covered_elements': covered_elements,
-                'total_elements': total_elements,
-                'test_case_count': len(test_cases)
-            }
-            
-        except Exception as e:
-            logger.error(f"覆盖率计算失败: {e}")
-            return {'coverage_percentage': 0, 'error': str(e)}
-    
-    def generate_test_matrix(self, test_cases: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        生成测试矩阵
-        
-        Args:
-            test_cases: 测试用例列表
-            
-        Returns:
-            测试矩阵
-        """
-        matrix = {
-            'by_type': {},
-            'by_priority': {},
-            'by_module': {}
-        }
-        
-        # 按类型统计
-        for test_case in test_cases:
-            test_type = test_case.get('test_type', 'unknown')
-            matrix['by_type'][test_type] = matrix['by_type'].get(test_type, 0) + 1
-            
-            # 按优先级统计
-            priority = test_case.get('priority', 'medium')
-            matrix['by_priority'][priority] = matrix['by_priority'].get(priority, 0) + 1
-            
-            # 按模块统计（从tags中提取）
-            tags = test_case.get('tags', [])
-            for tag in tags:
-                if tag.startswith('module:'):
-                    module = tag.replace('module:', '')
-                    matrix['by_module'][module] = matrix['by_module'].get(module, 0) + 1
-        
-        return matrix

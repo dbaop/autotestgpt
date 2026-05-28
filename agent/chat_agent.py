@@ -124,37 +124,31 @@ class ChatRouter:
         }
 
     def determine_intent(self, message: str, context: List[Dict]) -> str:
-        """根据消息内容和上下文确定意图"""
+        """根据消息内容和上下文确定意图（关键词 + LLM 兜底）"""
         message_lower = message.lower()
 
-        # 统计各 Agent 关键词匹配次数
         scores = {}
         for agent, keywords in INTENT_KEYWORDS.items():
-            score = 0
-            for keyword in keywords:
-                if keyword in message_lower:
-                    score += 1
-            scores[agent] = score
+            scores[agent] = sum(1 for kw in keywords if kw in message_lower)
 
-        # 如果上下文中有提到具体需求，默认路由到 req_agent
+        # 上下文中已有 agent 参与时，倾向推进下一步
         if context:
             last_messages = context[-3:]
             for msg in last_messages:
                 if msg.get('sender') in ['req_agent', 'case_agent', 'code_agent']:
-                    # 如果有 Agent 已经处理过，可能需要下一步
                     if scores.get('case_agent', 0) == 0:
-                        scores['case_agent'] += 1
+                        scores['case_agent'] = scores.get('case_agent', 0) + 1
                     if scores.get('code_agent', 0) == 0:
-                        scores.get('code_agent', 0)
+                        scores['code_agent'] = scores.get('code_agent', 0) + 1
                     break
 
-        # 返回得分最高的 Agent
         if scores:
-            best_agent = max(scores.items(), key=lambda x: x[1])
-            if best_agent[1] > 0:
-                return best_agent[0]
+            best_agent, best_score = max(scores.items(), key=lambda x: x[1])
+            if best_score > 0:
+                return best_agent
 
-        return 'req_agent'  # 默认路由到需求分析
+        # 关键词未命中时用 LLM 分类
+        return self._llm_classify_intent(message)
 
     def format_context(self, messages: List[Dict]) -> str:
         """格式化对话历史"""
@@ -162,12 +156,27 @@ class ChatRouter:
             return "（暂无历史对话）"
 
         lines = []
-        for msg in messages[-6:]:  # 最近6条消息
+        for msg in messages[-6:]:
             sender = msg.get('sender', 'unknown')
-            content = msg.get('content', '')[:200]  # 截断长消息
+            content = msg.get('content', '')[:200]
             lines.append(f"[{sender}]: {content}")
 
         return '\n'.join(lines)
+
+    def _llm_classify_intent(self, message: str) -> str:
+        """用 LLM 做意图分类（关键词未命中时的兜底）"""
+        try:
+            agent = self.agents['req_agent']
+            prompt = (
+                f"将以下用户消息分类为: req_agent, case_agent, code_agent, exec_agent。"
+                f"只输出一个词。\n\n消息: {message}"
+            )
+            result = agent.call_llm(prompt).strip().lower()
+            if result in INTENT_KEYWORDS:
+                return result
+        except Exception:
+            pass
+        return 'req_agent'
 
 
 class ChatAgent:

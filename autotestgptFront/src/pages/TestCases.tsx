@@ -1,6 +1,53 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { casesApi, TestCase } from '../api'
+
+const C = {
+  bg: 'var(--bg-card)',
+  bgElevated: 'var(--bg-elevated)',
+  bd: 'var(--border-subtle)',
+  cyan: 'var(--accent-cyan)',
+  violet: 'var(--accent-violet)',
+  magenta: 'var(--accent-magenta)',
+  emerald: 'var(--accent-emerald)',
+  amber: 'var(--accent-amber)',
+  rose: 'var(--accent-magenta)',
+  text: 'var(--text-primary)',
+  text2: 'var(--text-secondary)',
+  text3: 'var(--text-muted)',
+  mono: 'var(--font-mono)',
+  display: 'var(--font-display)',
+  body: 'var(--font-body)',
+}
+
+const TYPES = ['all', 'api', 'ui', 'performance', 'security'] as const
+
+const TYPE_COLORS: Record<string, { color: string; bg: string }> = {
+  api: { color: '#38bdf8', bg: 'rgba(56,189,248,0.12)' },
+  ui: { color: 'var(--accent-violet)', bg: 'rgba(139,92,246,0.12)' },
+  performance: { color: 'var(--accent-amber)', bg: 'rgba(255,176,32,0.12)' },
+  security: { color: 'var(--accent-magenta)', bg: 'rgba(255,45,120,0.12)' },
+}
+
+const PRIORITY_COLORS: Record<string, { color: string; bg: string; label: string }> = {
+  high: { color: 'var(--accent-magenta)', bg: 'rgba(255,45,120,0.12)', label: 'HIGH' },
+  medium: { color: 'var(--accent-amber)', bg: 'rgba(255,176,32,0.12)', label: 'MED' },
+  low: { color: 'var(--accent-emerald)', bg: 'rgba(0,255,136,0.12)', label: 'LOW' },
+}
+
+function FilterButton({ label, active, onClick, color }: { label: string; active: boolean; onClick: () => void; color: string }) {
+  return (
+    <button onClick={onClick} style={{
+      fontFamily: C.mono, fontSize: 10, fontWeight: 600, padding: '7px 16px', borderRadius: 100,
+      border: `1px solid ${active ? color : 'var(--border-default)'}`,
+      color: active ? color : 'var(--text-muted)',
+      background: active ? `${color}12` : 'transparent',
+      cursor: 'pointer', transition: 'all 0.2s ease', letterSpacing: '0.1em',
+    }}>
+      {label}
+    </button>
+  )
+}
 
 export default function TestCases() {
   const [cases, setCases] = useState<TestCase[]>([])
@@ -8,122 +55,132 @@ export default function TestCases() {
   const [filter, setFilter] = useState<string>('all')
 
   useEffect(() => {
-    casesApi.list()
-      .then(res => setCases(res.data.items || []))
-      .catch(err => console.error('Failed to load cases:', err))
-      .finally(() => setLoading(false))
+    casesApi.list().then(r => setCases(r.data.items || [])).catch(console.error).finally(() => setLoading(false))
   }, [])
 
-  const filteredCases = filter === 'all'
-    ? cases
-    : cases.filter(c => c.test_type === filter)
+  const filtered = useMemo(() => filter === 'all' ? cases : cases.filter(c => c.test_type === filter), [cases, filter])
 
-  if (loading) {
-    return <div className="text-center py-8 text-gray-500">加载中...</div>
-  }
+  const grouped = useMemo(() => {
+    const g: Record<number, TestCase[]> = {}
+    filtered.forEach(c => { if (!g[c.requirement_id]) g[c.requirement_id] = []; g[c.requirement_id].push(c) })
+    return g
+  }, [filtered])
 
-  return (
-    <div>
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-900">测试用例</h2>
-        <div className="flex gap-2">
-          {['all', 'api', 'ui', 'performance', 'security'].map(type => (
-            <button
-              key={type}
-              onClick={() => setFilter(type)}
-              className={`px-3 py-1.5 rounded-full text-sm ${
-                filter === type
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}
-            >
-              {type === 'all' ? '全部' : type.toUpperCase()}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="bg-white rounded-lg shadow overflow-hidden">
-        {filteredCases.length === 0 ? (
-          <div className="p-8 text-center text-gray-500">暂无测试用例</div>
-        ) : (
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  用例名称
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  类型
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  优先级
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  关联需求
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  创建时间
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {filteredCases.map(c => (
-                <tr key={c.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4">
-                    <div className="font-medium text-gray-900">{c.title}</div>
-                    <div className="text-sm text-gray-500">{c.description}</div>
-                  </td>
-                  <td className="px-6 py-4">
-                    <TypeBadge type={c.test_type} />
-                  </td>
-                  <td className="px-6 py-4">
-                    <PriorityBadge priority={c.priority} />
-                  </td>
-                  <td className="px-6 py-4 text-gray-500">
-                    <Link
-                      to={`/requirements/${c.requirement_id}`}
-                      className="text-indigo-600 hover:text-indigo-800"
-                    >
-                      #{c.requirement_id}
-                    </Link>
-                  </td>
-                  <td className="px-6 py-4 text-gray-500 text-sm">
-                    {new Date(c.created_at).toLocaleString('zh-CN')}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+  if (loading) return (
+    <div style={{ textAlign: 'center', padding: 80, color: C.text3, fontFamily: C.mono, fontSize: 13 }}>
+      <div style={{ display: 'inline-block', animation: 'spin-slow 1s linear infinite', fontSize: 24 }}>◆</div>
+      <div style={{ marginTop: 16 }}>加载测试用例中...</div>
     </div>
   )
-}
 
-function PriorityBadge({ priority }: { priority: string }) {
-  const map: Record<string, string> = {
-    high: 'bg-red-100 text-red-800',
-    medium: 'bg-yellow-100 text-yellow-800',
-    low: 'bg-green-100 text-green-800'
-  }
   return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${map[priority] || map.medium}`}>
-      {priority === 'high' ? '高' : priority === 'medium' ? '中' : '低'}
-    </span>
-  )
-}
+    <div className="page-stack animate-fade-in">
+      {/* Header */}
+      <section className="gradient-border-card panel-inner">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, marginBottom: 24 }}>
+          <div>
+            <div style={{ fontFamily: C.mono, fontSize: 11, letterSpacing: '0.32em', color: 'var(--accent-emerald)', textTransform: 'uppercase', marginBottom: 10 }}>
+              &gt; test_cases
+            </div>
+            <h2 style={{ fontFamily: C.display, fontSize: 32, fontWeight: 800, color: C.text, margin: '0 0 4px', letterSpacing: '-0.01em' }}>
+              测试用例
+            </h2>
+            <p style={{ fontFamily: C.body, fontSize: 14, color: C.text2, margin: 0 }}>
+              共 <span style={{ fontFamily: C.mono, fontWeight: 700, color: 'var(--accent-emerald)' }}>{cases.length}</span> 个测试用例
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {TYPES.map(t => {
+              const tc = TYPE_COLORS[t] || { color: C.text3, bg: 'transparent' }
+              return (
+                <FilterButton key={t} label={t === 'all' ? 'ALL' : t.toUpperCase()} active={filter === t} onClick={() => setFilter(t)} color={tc.color} />
+              )
+            })}
+          </div>
+        </div>
+      </section>
 
-function TypeBadge({ type }: { type: string }) {
-  const map: Record<string, string> = {
-    api: 'bg-blue-100 text-blue-800',
-    ui: 'bg-purple-100 text-purple-800',
-    performance: 'bg-orange-100 text-orange-800',
-    security: 'bg-red-100 text-red-800'
-  }
-  return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${map[type] || 'bg-gray-100 text-gray-800'}`}>
-      {type?.toUpperCase() || 'API'}
-    </span>
+      {/* Cases grouped by requirement */}
+      {!Object.keys(grouped).length ? (
+        <div className="gradient-border-card panel-inner" style={{
+          textAlign: 'center', padding: 64, fontFamily: C.mono, fontSize: 13, color: C.text3,
+        }}>
+          暂无测试用例
+        </div>
+      ) : (
+        Object.entries(grouped).sort(([a], [b]) => Number(b) - Number(a)).map(([reqId, reqCases]) => (
+          <div key={reqId} className="gradient-border-card animate-float-up data-table-wrap">
+            {/* Group header */}
+            <div style={{
+              padding: '16px 20px', background: 'linear-gradient(90deg, rgba(0,212,255,0.04) 0%, transparent 100%)',
+              borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: 8, background: 'rgba(0,212,255,0.1)',
+                  border: '1px solid rgba(0,212,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  <span style={{ fontFamily: C.mono, fontSize: 12, fontWeight: 800, color: 'var(--accent-cyan)' }}>◈</span>
+                </div>
+                <div>
+                  <Link to={`/requirements/${reqId}`} style={{
+                    fontFamily: C.mono, fontSize: 12, fontWeight: 700, color: 'var(--accent-cyan)', textDecoration: 'none',
+                  }}>
+                    req://{reqId}
+                  </Link>
+                  <span style={{ fontFamily: C.mono, fontSize: 11, color: C.text3, marginLeft: 8 }}>
+                    {reqCases.length} cases
+                  </span>
+                </div>
+              </div>
+              <span style={{
+                fontFamily: C.mono, fontSize: 9, fontWeight: 600, color: 'var(--accent-emerald)',
+                background: 'rgba(0,255,136,0.1)', padding: '3px 10px', borderRadius: 100,
+              }}>
+                {reqCases.length} items
+              </span>
+            </div>
+
+            {/* Cases table */}
+            <table className="data-table" style={{ minWidth: 760 }}>
+              <tbody>
+                {reqCases.map((c, i) => {
+                  const typeStyle = TYPE_COLORS[c.test_type] || { color: C.text3, bg: 'rgba(255,255,255,0.05)' }
+                  const prioStyle = PRIORITY_COLORS[c.priority] || { color: C.text3, bg: 'rgba(255,255,255,0.05)', label: c.priority }
+
+                  return (
+                    <tr key={c.id} className="animate-float-up" style={{
+                      animationDelay: `${i * 0.03}s`, transition: 'background 0.2s',
+                      borderTop: i > 0 ? '1px solid var(--border-subtle)' : 'none',
+                    }}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                      <td style={{ padding: '16px 20px' }}>
+                        <div style={{ fontFamily: C.display, fontSize: 14, fontWeight: 600, color: C.text, marginBottom: 4 }}>
+                          {c.title}
+                        </div>
+                        <div style={{ fontFamily: C.body, fontSize: 12, color: C.text3, lineHeight: 1.5 }}>
+                          {c.description}
+                        </div>
+                      </td>
+                      <td style={{ width: 90 }}>
+                        <span className="status-badge" style={{ color: typeStyle.color, background: typeStyle.bg }}>
+                          {c.test_type.toUpperCase()}
+                        </span>
+                      </td>
+                      <td style={{ width: 90 }}>
+                        <span className="status-badge" style={{ color: prioStyle.color, background: prioStyle.bg }}>
+                          {prioStyle.label}
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        ))
+      )}
+    </div>
   )
 }

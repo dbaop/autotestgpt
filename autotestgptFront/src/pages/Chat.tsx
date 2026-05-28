@@ -1,13 +1,31 @@
 import { useState, useEffect, useRef } from 'react'
 import { conversationsApi, Conversation, Message } from '../api'
 
-const AGENT_INFO: Record<string, { name: string; avatar: string; color: string }> = {
-  user: { name: '我', avatar: '👤', color: 'bg-indigo-100' },
-  router: { name: '助手', avatar: '🤖', color: 'bg-gray-100' },
-  req_agent: { name: '小Req', avatar: '📋', color: 'bg-blue-100' },
-  case_agent: { name: '小Case', avatar: '🧪', color: 'bg-green-100' },
-  code_agent: { name: '小Code', avatar: '💻', color: 'bg-orange-100' },
-  exec_agent: { name: '小Exec', avatar: '📊', color: 'bg-purple-100' }
+const C = {
+  bg: 'var(--bg-card)',
+  bgElevated: 'var(--bg-elevated)',
+  bgSurface: 'var(--bg-surface)',
+  bd: 'var(--border-subtle)',
+  cyan: 'var(--accent-cyan)',
+  violet: 'var(--accent-violet)',
+  magenta: 'var(--accent-magenta)',
+  emerald: 'var(--accent-emerald)',
+  amber: 'var(--accent-amber)',
+  text: 'var(--text-primary)',
+  text2: 'var(--text-secondary)',
+  text3: 'var(--text-muted)',
+  mono: 'var(--font-mono)',
+  display: 'var(--font-display)',
+  body: 'var(--font-body)',
+}
+
+const AGENT_COLORS: Record<string, { color: string; bg: string; border: string; label: string }> = {
+  user: { color: 'var(--accent-cyan)', bg: 'rgba(0,212,255,0.1)', border: 'rgba(0,212,255,0.2)', label: 'YOU' },
+  router: { color: 'var(--text-muted)', bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.06)', label: 'ASST' },
+  req_agent: { color: '#38bdf8', bg: 'rgba(56,189,248,0.1)', border: 'rgba(56,189,248,0.15)', label: 'REQ' },
+  case_agent: { color: 'var(--accent-emerald)', bg: 'rgba(0,255,136,0.1)', border: 'rgba(0,255,136,0.15)', label: 'CASE' },
+  code_agent: { color: 'var(--accent-amber)', bg: 'rgba(255,176,32,0.1)', border: 'rgba(255,176,32,0.15)', label: 'CODE' },
+  exec_agent: { color: 'var(--accent-violet)', bg: 'rgba(139,92,246,0.1)', border: 'rgba(139,92,246,0.15)', label: 'EXEC' },
 }
 
 export default function Chat() {
@@ -18,18 +36,16 @@ export default function Chat() {
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const pollingRef = useRef<number | null>(null)
   const initializedRef = useRef(false)
+  const sendingRef = useRef(false)
+  const lastSentRef = useRef('')
+  const lastSentTimeRef = useRef(0)
 
-  // 加载对话列表
   useEffect(() => {
     loadConversations()
-    return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current)
-    }
+    return () => { if (pollingRef.current) clearInterval(pollingRef.current) }
   }, [])
 
-  // 自动选择第一个对话
   useEffect(() => {
     if (conversations.length > 0 && !currentConv && !initializedRef.current) {
       initializedRef.current = true
@@ -37,257 +53,305 @@ export default function Chat() {
     }
   }, [conversations])
 
-  // 加载消息后滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
   const loadConversations = async () => {
-    try {
-      const res = await conversationsApi.list()
-      setConversations(res.data.items)
-    } catch (err) {
-      console.error('加载对话列表失败:', err)
-    }
+    try { const r = await conversationsApi.list(); setConversations(r.data.items) }
+    catch { console.error('加载对话列表失败') }
   }
 
   const createConversation = async () => {
     setCreating(true)
     try {
-      const res = await conversationsApi.create()
-      const newConv = res.data.conversation
-      setConversations(prev => [newConv, ...prev])
-      selectConversation(newConv.id)
-    } catch (err) {
-      console.error('创建对话失败:', err)
-    } finally {
-      setCreating(false)
-    }
+      const r = await conversationsApi.create()
+      const c = r.data.conversation
+      setConversations(prev => [c, ...prev])
+      selectConversation(c.id)
+    } catch { console.error('创建对话失败') }
+    finally { setCreating(false) }
   }
 
   const selectConversation = async (id: number) => {
     if (currentConv?.id === id) return
-    try {
-      const res = await conversationsApi.get(id)
-      setCurrentConv(res.data)
-      setMessages(res.data.messages || [])
-      startPolling(id)
-    } catch (err) {
-      console.error('加载对话失败:', err)
-    }
+    try { const r = await conversationsApi.get(id); setCurrentConv(r.data); setMessages(r.data.messages || []) }
+    catch { console.error('加载对话失败') }
   }
 
-  const startPolling = (_id: number) => {
-    // 暂时禁用轮询，只依赖 sendMessage 返回更新
-  }
-
-  const sendingRef = useRef(false)
-  const lastSentRef = useRef('')
-  const lastSentTimeRef = useRef(0)
+  const pollingRef = useRef<number | null>(null)
 
   const doSendMessage = async () => {
     const userInput = input.trim()
     if (!userInput || !currentConv) return
-
-    // 500ms 内相同内容不重复发送
     const now = Date.now()
-    if (lastSentRef.current === userInput && now - lastSentTimeRef.current < 500) {
-      console.log('=== blocked by same message within 500ms ===')
-      return
-    }
-
-    // 先锁定，防止重复调用
-    if (sendingRef.current) {
-      console.log('=== blocked by sendingRef ===')
-      return
-    }
+    if (lastSentRef.current === userInput && now - lastSentTimeRef.current < 500) return
+    if (sendingRef.current) return
     sendingRef.current = true
     lastSentRef.current = userInput
     lastSentTimeRef.current = now
-    setInput('')
-    setLoading(true)
-
+    setInput(''); setLoading(true)
     try {
-      const res = await conversationsApi.sendMessage(currentConv.id, userInput)
-      setMessages(res.data.messages || [])
+      const r = await conversationsApi.sendMessage(currentConv.id, userInput)
+      setMessages(r.data.messages || [])
       lastSentRef.current = ''
-    } catch (err) {
-      console.error('发送消息失败:', err)
-    } finally {
-      sendingRef.current = false
-      setLoading(false)
-    }
+    } catch { console.error('发送消息失败') }
+    finally { sendingRef.current = false; setLoading(false) }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      doSendMessage()
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSendMessage() }
   }
 
   const deleteConversation = async (id: number, e: React.MouseEvent) => {
     e.stopPropagation()
     if (!confirm('确定要删除这个对话吗？')) return
-
     try {
       await conversationsApi.delete(id)
       setConversations(prev => prev.filter(c => c.id !== id))
-      if (currentConv?.id === id) {
-        setCurrentConv(null)
-        setMessages([])
-      }
-    } catch (err) {
-      console.error('删除对话失败:', err)
-    }
+      if (currentConv?.id === id) { setCurrentConv(null); setMessages([]) }
+    } catch { console.error('删除对话失败') }
   }
 
+  const deduped = (() => {
+    const seen = new Set<number>()
+    return messages.filter(m => { if (seen.has(m.id)) return false; seen.add(m.id); return true })
+  })()
+
   return (
-    <div className="flex h-[calc(100vh-8rem)]">
-      {/* 左侧对话列表 */}
-      <div className="w-80 bg-white border-r border-gray-200 flex flex-col">
-        <div className="p-4 border-b border-gray-200">
-          <button
-            onClick={createConversation}
-            disabled={creating}
-            className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
-          >
-            {creating ? '创建中...' : '+ 新建对话'}
+    <div className="animate-fade-in" style={{
+      display: 'flex', height: 'calc(100vh - 8rem)', borderRadius: 24, overflow: 'hidden',
+      border: '1px solid var(--border-subtle)', background: 'var(--bg-card)',
+    }}>
+      {/* Left sidebar - conversations */}
+      <div style={{
+        width: 300, background: 'linear-gradient(180deg, var(--bg-surface) 0%, var(--bg-root) 100%)',
+        borderRight: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', flexShrink: 0,
+      }}>
+        <div style={{ padding: '20px 18px', borderBottom: '1px solid var(--border-subtle)' }}>
+          <button onClick={createConversation} disabled={creating} style={{
+            width: '100%', fontFamily: C.mono, fontSize: 12, fontWeight: 700,
+            color: '#050810', background: 'linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald))',
+            padding: '14px 18px', borderRadius: 12, border: 'none', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            transition: 'all 0.2s ease', opacity: creating ? 0.5 : 1,
+          }}
+            onMouseEnter={e => !creating && (e.currentTarget.style.transform = 'translateY(-1px)')}
+            onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}>
+            <span style={{ fontSize: 14 }}>+</span> {creating ? '创建中...' : '新建对话'}
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto">
-          {conversations.length === 0 ? (
-            <div className="p-4 text-center text-gray-500">
-              暂无对话<br />
-              <button onClick={createConversation} className="text-indigo-600 hover:text-indigo-800">
-                创建第一个对话
-              </button>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 10px' }}>
+          {!conversations.length ? (
+            <div style={{ textAlign: 'center', padding: 40, fontFamily: C.mono, fontSize: 11, color: C.text3 }}>
+              暂无对话
             </div>
           ) : (
-            conversations.map(conv => (
-              <div
-                key={conv.id}
-                onClick={() => {
-                  setCurrentConv(conv)
-                  selectConversation(conv.id)
-                }}
-                className={`p-4 border-b border-gray-100 cursor-pointer hover:bg-gray-50 ${
-                  currentConv?.id === conv.id ? 'bg-indigo-50' : ''
-                }`}
-              >
-                <div className="flex justify-between items-start">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-gray-900 truncate">{conv.title}</div>
-                    <div className="text-xs text-gray-500 mt-1">
-                      {conv.message_count} 条消息
+            <div className="stagger-children">
+              {conversations.map(conv => (
+                <div key={conv.id} onClick={() => { setCurrentConv(conv); selectConversation(conv.id) }}
+                  style={{
+                    padding: '14px 16px', marginBottom: 4, borderRadius: 14, cursor: 'pointer',
+                    background: currentConv?.id === conv.id ? 'rgba(0,212,255,0.06)' : 'transparent',
+                    border: currentConv?.id === conv.id ? '1px solid rgba(0,212,255,0.15)' : '1px solid transparent',
+                    transition: 'all 0.2s ease',
+                  }}
+                  onMouseEnter={e => {
+                    if (currentConv?.id !== conv.id) {
+                      e.currentTarget.style.background = 'rgba(255,255,255,0.03)'
+                      e.currentTarget.style.borderColor = 'var(--border-default)'
+                    }
+                  }}
+                  onMouseLeave={e => {
+                    if (currentConv?.id !== conv.id) {
+                      e.currentTarget.style.background = 'transparent'
+                      e.currentTarget.style.borderColor = 'transparent'
+                    }
+                  }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: C.display, fontSize: 13, fontWeight: 600, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {conv.title}
+                      </div>
+                      <div style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, marginTop: 4 }}>
+                        {conv.message_count} msgs
+                      </div>
                     </div>
+                    <button onClick={(e) => deleteConversation(conv.id, e)}
+                      style={{
+                        fontFamily: C.mono, fontSize: 14, color: C.text3, background: 'none',
+                        border: 'none', cursor: 'pointer', padding: 0, lineHeight: 1,
+                        opacity: 0.6, transition: 'opacity 0.2s',
+                      }}
+                      onMouseEnter={e => (e.currentTarget.style.opacity = '1', e.currentTarget.style.color = 'var(--accent-magenta)')}
+                      onMouseLeave={e => (e.currentTarget.style.opacity = '0.6', e.currentTarget.style.color = C.text3)}>
+                      ×
+                    </button>
                   </div>
-                  <button
-                    onClick={(e) => deleteConversation(conv.id, e)}
-                    className="text-gray-400 hover:text-red-500 ml-2"
-                  >
-                    ×
-                  </button>
                 </div>
-              </div>
-            ))
+              ))}
+            </div>
           )}
         </div>
       </div>
 
-      {/* 右侧聊天区域 */}
-      <div className="flex-1 flex flex-col bg-gray-50">
+      {/* Right - chat area */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: 'var(--bg-surface)' }}>
         {!currentConv ? (
-          <div className="flex-1 flex items-center justify-center text-gray-500">
-            <div className="text-center">
-              <div className="text-4xl mb-4">🤖</div>
-              <div>选择一个对话或新建对话开始聊天</div>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{
+                width: 80, height: 80, borderRadius: 20, margin: '0 auto 24px',
+                background: 'linear-gradient(135deg, rgba(0,212,255,0.1), rgba(139,92,246,0.1))',
+                border: '1px solid rgba(0,212,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <span style={{ fontFamily: C.mono, fontSize: 36, fontWeight: 800, color: 'var(--accent-cyan)' }}>&gt;_</span>
+              </div>
+              <div style={{ fontFamily: C.display, fontSize: 16, fontWeight: 600, color: C.text2, marginBottom: 8 }}>
+                选择对话或新建对话开始
+              </div>
+              <div style={{ fontFamily: C.mono, fontSize: 11, color: C.text3 }}>
+                multi_agent collaboration
+              </div>
             </div>
           </div>
         ) : (
           <>
-            {/* 消息列表 */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {(() => {
-                // 基于 ID 去重渲染
-                const seen = new Set<number>()
-                return messages.filter(msg => {
-                  if (seen.has(msg.id)) return false
-                  seen.add(msg.id)
-                  return true
-                }).map(msg => {
-                const agent = AGENT_INFO[msg.sender] || AGENT_INFO.router
+            {/* Chat header */}
+            <div style={{
+              padding: '16px 24px', borderBottom: '1px solid var(--border-subtle)',
+              display: 'flex', alignItems: 'center', gap: 12,
+              background: 'rgba(255,255,255,0.01)',
+            }}>
+              <div style={{
+                width: 40, height: 40, borderRadius: 12, background: 'linear-gradient(135deg, var(--accent-cyan), var(--accent-violet))',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                boxShadow: '0 4px 16px rgba(0,212,255,0.2)',
+              }}>
+                <span style={{ fontFamily: C.mono, fontSize: 16, fontWeight: 800, color: '#fff' }}>◈</span>
+              </div>
+              <div>
+                <div style={{ fontFamily: C.display, fontSize: 15, fontWeight: 700, color: C.text }}>
+                  {currentConv.title}
+                </div>
+                <div style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, marginTop: 2 }}>
+                  {currentConv.message_count} messages · session active
+                </div>
+              </div>
+            </div>
+
+            {/* Messages */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {deduped.map((msg, idx) => {
+                const agent = AGENT_COLORS[msg.sender] || AGENT_COLORS.router
+                const isUser = msg.sender === 'user'
                 return (
-                  <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`flex gap-3 max-w-[70%] ${msg.sender === 'user' ? 'flex-row-reverse' : ''}`}>
-                      <div className={`w-10 h-10 rounded-full flex items-center justify-center text-xl ${agent.color}`}>
-                        {agent.avatar}
+                  <div key={msg.id} className="animate-float-up" style={{
+                    display: 'flex', flexDirection: isUser ? 'row-reverse' : 'row', gap: 12, alignItems: 'flex-start',
+                    animationDelay: `${idx * 0.03}s`,
+                  }}>
+                    {/* Avatar */}
+                    <div style={{
+                      width: 40, height: 40, borderRadius: 12, flexShrink: 0, display: 'flex',
+                      alignItems: 'center', justifyContent: 'center',
+                      background: agent.bg, border: `1px solid ${agent.border}`,
+                      boxShadow: isUser ? '0 4px 16px rgba(0,212,255,0.15)' : 'none',
+                    }}>
+                      <span style={{ fontFamily: C.mono, fontSize: 10, fontWeight: 800, color: agent.color, letterSpacing: '0.06em' }}>
+                        {agent.label}
+                      </span>
+                    </div>
+
+                    {/* Message bubble */}
+                    <div style={{ maxWidth: '65%' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, ...(isUser ? { justifyContent: 'flex-end' } : {}) }}>
+                        <span style={{ fontFamily: C.mono, fontSize: 10, fontWeight: 700, color: agent.color }}>{agent.label}</span>
+                        <span style={{ fontFamily: C.mono, fontSize: 9, color: C.text3 }}>
+                          {new Date(msg.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+                        </span>
                       </div>
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-sm font-medium text-gray-700">{agent.name}</span>
-                          <span className="text-xs text-gray-400">
-                            {new Date(msg.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
-                          </span>
-                        </div>
-                        <div className={`rounded-2xl px-4 py-2 ${
-                          msg.sender === 'user'
-                            ? 'bg-indigo-600 text-white'
-                            : 'bg-white shadow-sm border border-gray-200'
-                        }`}>
-                          <pre className="whitespace-pre-wrap text-sm font-sans">{msg.content}</pre>
-                        </div>
+                      <div style={{
+                        padding: '14px 18px', borderRadius: isUser ? '16px 4px 16px 16px' : '4px 16px 16px 16px',
+                        background: agent.bg, border: `1px solid ${agent.border}`,
+                        ...(isUser ? { borderRight: `3px solid ${agent.color}` } : {}),
+                      }}>
+                        <pre style={{ margin: 0, fontFamily: C.mono, fontSize: 12, color: C.text, whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
+                          {msg.content}
+                        </pre>
                       </div>
                     </div>
                   </div>
                 )
-              })
-              })()}
+              })}
+
+              {/* Loading indicator */}
               {loading && (
-                <div className="flex justify-start">
-                  <div className="flex gap-3">
-                    <div className="w-10 h-10 rounded-full flex items-center justify-center text-xl bg-gray-100">
-                      🤖
-                    </div>
-                    <div className="bg-white shadow-sm border border-gray-200 rounded-2xl px-4 py-3">
-                      <div className="flex gap-1">
-                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                      </div>
-                    </div>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                  <div style={{
+                    width: 40, height: 40, borderRadius: 12, background: 'rgba(139,92,246,0.1)',
+                    border: '1px solid rgba(139,92,246,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <span style={{ fontFamily: C.mono, fontSize: 10, fontWeight: 800, color: 'var(--accent-violet)' }}>...</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 5 }}>
+                    {[0, 1, 2].map(i => (
+                      <span key={i} className="status-dot checking" style={{
+                        width: 8, height: 8, background: 'var(--accent-violet)',
+                        animationDelay: `${i * 0.15}s`,
+                      }} />
+                    ))}
                   </div>
                 </div>
               )}
               <div ref={messagesEndRef} />
             </div>
 
-            {/* 输入框 */}
-            <div className="p-4 bg-white border-t border-gray-200">
-              <div className="flex gap-3">
+            {/* Input area */}
+            <div style={{
+              padding: '20px 24px', borderTop: '1px solid var(--border-subtle)',
+              background: 'rgba(0,0,0,0.2)',
+            }}>
+              <div style={{
+                display: 'flex', gap: 12, alignItems: 'flex-end',
+                background: 'var(--bg-card)', border: '1px solid var(--border-subtle)',
+                borderRadius: 16, padding: '4px 4px 4px 16px',
+              }}>
                 <textarea
                   value={input}
                   onChange={e => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder="输入消息，Enter 发送..."
+                  placeholder="请输入消息..."
                   disabled={loading || sendingRef.current}
-                  className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 resize-none disabled:opacity-50"
-                  rows={2}
+                  rows={1}
+                  style={{
+                    flex: 1, padding: '12px 0', background: 'transparent', border: 'none',
+                    color: C.text, fontFamily: C.mono, fontSize: 13, resize: 'none', outline: 'none',
+                    opacity: (loading || sendingRef.current) ? 0.5 : 1,
+                  }}
                 />
-                <button
-                  type="button"
-                  onClick={doSendMessage}
-                  disabled={loading || sendingRef.current}
-                  className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
-                >
+                <button type="button" onClick={doSendMessage} disabled={loading || sendingRef.current} style={{
+                  fontFamily: C.mono, fontSize: 12, fontWeight: 700, color: '#050810',
+                  background: 'linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald))',
+                  padding: '12px 20px', borderRadius: 12, border: 'none', cursor: 'pointer',
+                  transition: 'all 0.2s ease', opacity: (loading || sendingRef.current) ? 0.5 : 1,
+                }}
+                  onMouseEnter={e => !(loading || sendingRef.current) && (e.currentTarget.style.transform = 'translateY(-1px)')}
+                  onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}>
                   发送
                 </button>
               </div>
-              <div className="mt-2 text-xs text-gray-400">
-                <span className="mr-4">🤖 小Req - 需求分析</span>
-                <span className="mr-4">🧪 小Case - 用例设计</span>
-                <span className="mr-4">💻 小Code - 代码生成</span>
-                <span>📊 小Exec - 执行报告</span>
+
+              {/* Agent legend */}
+              <div style={{ display: 'flex', gap: 12, marginTop: 12, flexWrap: 'wrap', paddingLeft: 4 }}>
+                {Object.entries(AGENT_COLORS).filter(([k]) => k !== 'user' && k !== 'router').map(([key, info]) => (
+                  <span key={key} style={{
+                    fontFamily: C.mono, fontSize: 9, color: info.color, background: info.bg,
+                    padding: '3px 8px', borderRadius: 6, border: `1px solid ${info.border}`,
+                  }}>
+                    {info.label}
+                  </span>
+                ))}
               </div>
             </div>
           </>
