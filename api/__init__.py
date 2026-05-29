@@ -4,7 +4,7 @@ API module
 
 from flask import Blueprint
 
-from .routes import requirements, test_cases, executions, projects, conversations, code_reviews, knowledge_bases, reports, autofix, flow
+from .routes import requirements, test_cases, executions, projects, conversations, code_reviews, knowledge_bases, reports, autofix, flow, agent_workbench
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -36,6 +36,7 @@ api_blueprint.add_url_rule('/conversations/<int:conv_id>', view_func=conversatio
 api_blueprint.add_url_rule('/conversations/<int:conv_id>', view_func=conversations.delete_conversation, methods=['DELETE'])
 api_blueprint.add_url_rule('/conversations/<int:conv_id>/messages', view_func=conversations.get_messages, methods=['GET'])
 api_blueprint.add_url_rule('/conversations/<int:conv_id>/messages', view_func=conversations.send_message, methods=['POST'])
+api_blueprint.add_url_rule('/conversations/<int:conv_id>/agent-context', view_func=conversations.get_agent_context, methods=['GET'])
 
 # Code reviews (Phase 1)
 api_blueprint.add_url_rule('/code-reviews', view_func=code_reviews.list_review_tasks, methods=['GET'])
@@ -57,6 +58,10 @@ api_blueprint.add_url_rule('/reports/<int:report_id>/preview', view_func=reports
 
 # AutoFix suggestions (Phase 4)
 api_blueprint.add_url_rule('/autofix/suggestions', view_func=autofix.generate_fix_suggestions, methods=['POST'])
+
+# Agent workbench
+api_blueprint.add_url_rule('/agent-workbench', view_func=agent_workbench.list_agent_workbench, methods=['GET'])
+api_blueprint.add_url_rule('/agent-workbench/<int:requirement_id>', view_func=agent_workbench.get_agent_workbench, methods=['GET'])
 
 # Flow routes
 api_blueprint.add_url_rule('/flow/start', view_func=flow.start_test_flow, methods=['POST'])

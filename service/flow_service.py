@@ -9,7 +9,7 @@ from typing import Any
 
 from agent.exec_agent import ExecAgent
 from flow.test_flow import AutoTestFlow
-from models import ExecutionRecord, Requirement, TestCase, TestScript, db
+from models import Conversation, ExecutionRecord, Requirement, TestCase, TestScript, db
 from service.errors import NotFoundError, ValidationError
 
 
@@ -33,7 +33,17 @@ def _set_requirement_status(requirement_id: int, status: str, execution_progress
     return requirement
 
 
-def execute_flow_async(flow, flow_data, requirement_id):
+def _resolve_flask_app():
+    from flask import has_app_context, current_app
+
+    if has_app_context():
+        return current_app._get_current_object()
+    from main import app
+
+    return app
+
+
+def _execute_flow_async_impl(flow, flow_data, requirement_id):
     flow_id = str(id(flow))
     try:
         with _registry_lock:
@@ -47,12 +57,24 @@ def execute_flow_async(flow, flow_data, requirement_id):
         with _registry_lock:
             _flow_registry[requirement_id] = {"flow_id": flow_id, "status": result.get("status", "error")}
     except Exception as e:
+        db.session.rollback()
         requirement = db.session.get(Requirement, requirement_id)
         if requirement:
             requirement.status = "error"
             db.session.commit()
         with _registry_lock:
             _flow_registry[requirement_id] = {"flow_id": flow_id, "status": "error", "error": str(e)}
+    finally:
+        remove = getattr(db.session, "remove", None)
+        if callable(remove):
+            remove()
+
+
+def execute_flow_async(flow, flow_data, requirement_id):
+    """在线程池中执行时必须持有 Flask app context。"""
+    flask_app = _resolve_flask_app()
+    with flask_app.app_context():
+        _execute_flow_async_impl(flow, flow_data, requirement_id)
 
 
 def start_flow(data: dict):
@@ -61,19 +83,33 @@ def start_flow(data: dict):
         raise ValidationError("Please provide `demand` field")
 
     project_id = data.get("project_id", 1)
+    test_environment = data.get("test_environment") or {}
+    structured_seed = {"test_environment": test_environment} if test_environment else None
     requirement = Requirement(
         title=data.get("title") or f"Requirement-{_now().strftime('%Y%m%d-%H%M%S')}",
         description=demand[:100] + "..." if len(demand) > 100 else demand,
         raw_text=demand,
+        structured_data=structured_seed,
         status="pending",
+        execution_progress={"test_environment": test_environment} if test_environment else None,
         knowledge_base_id=data.get("knowledge_base_id"),
         project_id=project_id,
     )
     db.session.add(requirement)
+    db.session.flush()
+
+    conversation = Conversation(
+        title=f"需求 #{requirement.id} · {(requirement.title or '')[:40]}",
+        requirement_id=requirement.id,
+        status="active",
+    )
+    db.session.add(conversation)
     db.session.commit()
 
     flow = AutoTestFlow()
     flow_data = {"demand": demand, "requirement_id": requirement.id, "project_id": project_id}
+    if test_environment:
+        flow_data["test_environment"] = test_environment
     review_config = data.get("review") or data.get("review_config")
     if review_config:
         flow_data["review"] = review_config
@@ -85,6 +121,7 @@ def start_flow(data: dict):
     return {
         "message": "Test flow started",
         "requirement_id": requirement.id,
+        "conversation_id": conversation.id,
         "status": "processing",
         "flow_id": str(id(flow)),
     }

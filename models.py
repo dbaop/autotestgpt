@@ -406,6 +406,31 @@ class FinalReport(db.Model):
         }
 
 
+class AgentEvent(db.Model):
+    __tablename__ = 'agent_events'
+
+    id = db.Column(db.Integer, primary_key=True)
+    requirement_id = db.Column(db.Integer, db.ForeignKey('requirements.id'), nullable=False)
+    agent = db.Column(db.String(80), nullable=False)
+    event_type = db.Column(db.String(50), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    payload = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    requirement = db.relationship('Requirement', backref='agent_events', lazy=True)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'requirement_id': self.requirement_id,
+            'agent': self.agent,
+            'event_type': self.event_type,
+            'message': self.message,
+            'payload': self.payload or {},
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class FixSuggestion(db.Model):
     __tablename__ = 'fix_suggestions'
 

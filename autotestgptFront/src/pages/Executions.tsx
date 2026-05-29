@@ -103,7 +103,7 @@ export default function Executions() {
         <div style={{ fontFamily: S.mono, fontSize: 11, letterSpacing: '0.32em', color: 'var(--accent-amber)', textTransform: 'uppercase', marginBottom: 10 }}>
           &gt; execution_ledger
         </div>
-        <h2 style={{ fontFamily: S.display, fontSize: 32, fontWeight: 800, color: S.text, margin: '0 0 8px', letterSpacing: '-0.01em' }}>
+        <h2 style={{ fontFamily: S.display, fontSize: 32, fontWeight: 800, color: S.text, margin: '0 0 8px', letterSpacing: 0 }}>
           执行记录
         </h2>
         <p style={{ fontFamily: S.body, fontSize: 14, color: S.text2, margin: '0 0 28px' }}>

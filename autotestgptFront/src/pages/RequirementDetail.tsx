@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  autofixApi, codeReviewsApi, CodeReviewTask, FixSuggestion,
+  autofixApi, codeReviewsApi, CodeReviewTask, conversationsApi, FixSuggestion,
   flowApi, reportsApi, ReportSummary,
   RequirementDetail as RequirementDetailType, requirementsApi, TestCase,
 } from '../api'
@@ -86,6 +86,7 @@ function TinyBadge({ text, color }: { text: string; color: string }) {
 
 export default function RequirementDetail() {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
   const requirementId = Number(id)
 
   const [requirement, setRequirement] = useState<RequirementDetailType | null>(null)
@@ -176,6 +177,19 @@ export default function RequirementDetail() {
     finally { setGeneratingReport(false) }
   }
 
+  const openRequirementChat = async () => {
+    if (!requirement) return
+    try {
+      const res = await conversationsApi.create({
+        title: `需求 #${requirement.id} · ${requirement.title}`,
+        requirement_id: requirement.id,
+      })
+      navigate('/chat', { state: { conversationId: res.data.conversation.id } })
+    } catch (err: any) {
+      setError(err.response?.data?.message || err.response?.data?.error || '打开对话失败')
+    }
+  }
+
   const handleGenerateFixes = async () => {
     if (!requirement) return
     setGeneratingFixes(true); setError(null)
@@ -207,14 +221,33 @@ export default function RequirementDetail() {
         }}>
           ← 返回需求列表
         </Link>
-        <button type="button" onClick={() => loadData(true)} disabled={refreshing}
-          style={{
-            fontFamily: C.mono, fontSize: 11, color: C.text3, background: 'none',
-            border: '1px solid var(--border-default)', borderRadius: 100, padding: '6px 16px', cursor: 'pointer',
-            opacity: refreshing ? 0.5 : 1,
-          }}>
-          {refreshing ? '刷新中...' : '刷新'}
-        </button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <Link
+            to={`/workbench/${requirement.id}`}
+            style={{
+              fontFamily: C.mono, fontSize: 11, fontWeight: 600, color: C.violet,
+              textDecoration: 'none', border: '1px solid rgba(139,92,246,0.35)',
+              borderRadius: 100, padding: '6px 16px',
+            }}
+          >
+            Agent 工作台
+          </Link>
+          <button type="button" onClick={openRequirementChat}
+            style={{
+              fontFamily: C.mono, fontSize: 11, color: C.cyan, background: 'none',
+              border: '1px solid rgba(0,212,255,0.35)', borderRadius: 100, padding: '6px 16px', cursor: 'pointer',
+            }}>
+            对话协作
+          </button>
+          <button type="button" onClick={() => loadData(true)} disabled={refreshing}
+            style={{
+              fontFamily: C.mono, fontSize: 11, color: C.text3, background: 'none',
+              border: '1px solid var(--border-default)', borderRadius: 100, padding: '6px 16px', cursor: 'pointer',
+              opacity: refreshing ? 0.5 : 1,
+            }}>
+            {refreshing ? '刷新中...' : '刷新'}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -233,7 +266,7 @@ export default function RequirementDetail() {
             <div style={{ fontFamily: C.mono, fontSize: 11, letterSpacing: '0.32em', color: 'var(--accent-cyan)', textTransform: 'uppercase', marginBottom: 10 }}>
               &gt; requirement_overview
             </div>
-            <h1 style={{ fontFamily: C.display, fontSize: 28, fontWeight: 800, color: C.text, margin: '0 0 10px', letterSpacing: '-0.01em' }}>
+            <h1 style={{ fontFamily: C.display, fontSize: 28, fontWeight: 800, color: C.text, margin: '0 0 10px', letterSpacing: 0 }}>
               {requirement.title}
             </h1>
             <p style={{ fontFamily: C.body, fontSize: 14, color: C.text2, margin: 0, lineHeight: 1.7 }}>

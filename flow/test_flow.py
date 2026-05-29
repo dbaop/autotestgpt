@@ -19,6 +19,15 @@ from service.review_service import run_review_task
 logger = logging.getLogger(__name__)
 
 
+def _emit_event(requirement_id: int, agent: str, event_type: str, message: str, payload: Optional[Dict[str, Any]] = None):
+    try:
+        from service.agent_event_service import emit_agent_event
+
+        emit_agent_event(requirement_id, agent, event_type, message, payload)
+    except Exception as exc:
+        logger.warning("emit_agent_event failed: %s", exc)
+
+
 def _now():
     return datetime.now(timezone.utc)
 
@@ -206,6 +215,16 @@ class AutoTestFlow:
                 self.end_time = _now()
                 return {'status': 'success', 'requirement_id': requirement_id, 'message': '流程已完成'}
             else:
+                test_env = input_data.get('test_environment') or {}
+                if test_env.get('test_url'):
+                    _emit_event(
+                        requirement_id,
+                        'BrowserAgent',
+                        'progress',
+                        f"打开测试地址 {test_env['test_url']}（agent-browser）",
+                        test_env,
+                    )
+
                 self.current_step = 'parse_requirement'
                 structured_req = self.parse_requirement(input_data['demand'], requirement_id)
 
@@ -225,11 +244,23 @@ class AutoTestFlow:
                 self.current_step = 'code_review'
                 review_result = self.run_code_review(review_config)
                 steps.append('code_review')
+                _emit_event(
+                    requirement_id,
+                    'CodeReviewAgent',
+                    'completed',
+                    f"发现 {review_result.get('finding_count', 0)} 条高风险变更",
+                )
 
                 if review_result.get('task_id'):
                     self.current_step = 'defect_analysis'
                     defect_result = defect_service.analyze_requirement(requirement_id, review_result['task_id'])
                     steps.append('defect_analysis')
+                    _emit_event(
+                        requirement_id,
+                        'BugAgent',
+                        'completed',
+                        f"沉淀 {defect_result.get('defect_count', 0)} 条缺陷候选",
+                    )
 
                     self.current_step = 'report_generation'
                     report = report_service.generate_requirement_report(requirement_id, review_result['task_id'])
@@ -313,6 +344,7 @@ class AutoTestFlow:
 
     def parse_requirement(self, demand: str, requirement_id: int) -> Dict[str, Any]:
         logger.info(f"步骤1: 解析需求 (ID: {requirement_id})")
+        _emit_event(requirement_id, 'ReqAgent', 'started', '开始解析需求')
         try:
             structured_req = self.req_agent.process({'demand': demand})
             self.da.update_requirement(
@@ -322,15 +354,18 @@ class AutoTestFlow:
                 structured_data=structured_req,
                 status='parsed',
             )
+            _emit_event(requirement_id, 'ReqAgent', 'completed', '需求解析完成')
             logger.info(f"需求解析完成: {structured_req.get('title', '未命名')}")
             return structured_req
         except Exception as e:
+            _emit_event(requirement_id, 'ReqAgent', 'failed', f'需求解析失败: {e}')
             logger.error(f"需求解析失败: {e}")
             self.errors.append(f"需求解析失败: {e}")
             raise
 
     def design_test_cases(self, structured_req: Dict[str, Any], requirement_id: int) -> Dict[str, Any]:
         logger.info(f"步骤2: 设计测试用例 (需求ID: {requirement_id})")
+        _emit_event(requirement_id, 'CaseAgent', 'started', '开始设计测试用例')
         try:
             test_cases = self.case_agent.process({
                 'structured_req': structured_req,
@@ -341,28 +376,36 @@ class AutoTestFlow:
             self.da.save_cases(test_cases.get('test_cases', []), requirement_id, suite_id)
             self.da.update_requirement(requirement_id, status='cases_generated')
 
-            logger.info(f"测试用例设计完成, 生成 {len(test_cases.get('test_cases', []))} 个用例")
+            count = len(test_cases.get('test_cases', []))
+            _emit_event(requirement_id, 'CaseAgent', 'completed', f'生成 {count} 条测试用例')
+            logger.info(f"测试用例设计完成, 生成 {count} 个用例")
             return test_cases
         except Exception as e:
+            _emit_event(requirement_id, 'CaseAgent', 'failed', f'用例设计失败: {e}')
             logger.error(f"测试用例设计失败: {e}")
             self.errors.append(f"测试用例设计失败: {e}")
             raise
 
     def generate_code(self, test_cases: Dict[str, Any], requirement_id: int) -> Dict[str, Any]:
         logger.info(f"步骤3: 生成测试代码 (需求ID: {requirement_id})")
+        _emit_event(requirement_id, 'CodeAgent', 'started', '开始生成 Playwright/API 脚本')
         try:
             test_scripts = self.code_agent.process({'test_cases': test_cases})
             self.da.save_scripts(test_scripts.get('scripts', []), requirement_id)
             self.da.update_requirement(requirement_id, status='code_generated')
-            logger.info(f"测试代码生成完成, 生成 {len(test_scripts.get('scripts', []))} 个脚本")
+            script_count = len(test_scripts.get('scripts', []))
+            _emit_event(requirement_id, 'CodeAgent', 'completed', f'生成 {script_count} 个自动化脚本')
+            logger.info(f"测试代码生成完成, 生成 {script_count} 个脚本")
             return test_scripts
         except Exception as e:
+            _emit_event(requirement_id, 'CodeAgent', 'failed', f'脚本生成失败: {e}')
             logger.error(f"测试代码生成失败: {e}")
             self.errors.append(f"测试代码生成失败: {e}")
             raise
 
     def execute_tests(self, requirement_id: int) -> Dict[str, Any]:
         logger.info(f"步骤4: 执行测试 (需求ID: {requirement_id})")
+        _emit_event(requirement_id, 'ExecAgent', 'started', '开始执行 Playwright/pytest')
         self.da.update_requirement(requirement_id, status='executing')
         self.da.set_execution_progress(requirement_id, {
             'total': 0, 'executed': 0, 'current_step': '准备中',
@@ -456,6 +499,7 @@ class AutoTestFlow:
             'end_time': _now().isoformat(), 'details': details,
         })
 
+        _emit_event(requirement_id, 'ExecAgent', 'completed', f'执行完成，共 {len(all_results)} 个脚本')
         logger.info(f"测试执行完成, 执行 {len(all_results)} 个脚本")
         return {'executions': all_results}
 

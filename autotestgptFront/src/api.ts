@@ -120,6 +120,27 @@ export interface PaginatedResponse<T> {
   pages: number
 }
 
+export interface ChatAgentContext {
+  requirement_id?: number | null
+  title?: string
+  status?: string
+  headline: string
+  running_agents?: Array<{ id: string; name: string; action: string }>
+  stats?: {
+    cases: number
+    ui_scripts: number
+    defects: number
+    review_findings: number
+  }
+  pending_questions: Array<{
+    id?: number | null
+    agent?: string
+    message?: string
+    event_type?: string
+  }>
+  workbench_path: string
+}
+
 export interface Conversation {
   id: number
   title: string
@@ -129,6 +150,7 @@ export interface Conversation {
   updated_at: string
   message_count: number
   messages?: Message[]
+  agent_context?: ChatAgentContext | null
 }
 
 export interface Message {
@@ -297,9 +319,67 @@ export const autofixApi = {
     }),
 }
 
+export interface AgentWorkbenchAgent {
+  id: string
+  name: string
+  status: 'queued' | 'running' | 'done' | 'failed'
+  current_action: string
+}
+
+export interface AgentWorkbenchItem {
+  requirement: Requirement
+  environment: {
+    test_url?: string | null
+    login_state?: string
+    credential_ref?: string | null
+    allow_explore?: boolean
+    last_probe_at?: string | null
+    probe_status?: string | null
+  }
+  review: {
+    repo_url?: string | null
+    branch?: string | null
+    days?: number | null
+    status?: string | null
+  }
+  artifacts: {
+    cases: number
+    ui_scripts: number
+    api_scripts: number
+    review_findings: number
+    defects: number
+    reports: number
+  }
+  agents: AgentWorkbenchAgent[]
+  events: Array<{
+    id: number
+    agent: string
+    event_type: string
+    message: string
+    created_at: string
+    payload?: Record<string, unknown>
+  }>
+  interventions: Array<{ type?: string; message?: string; test_url?: string }>
+  overall_progress: { status: string; updated_at?: string | null }
+}
+
+export interface AgentWorkbenchListResponse {
+  summary: { total_requirements: number }
+  items: AgentWorkbenchItem[]
+}
+
+export const agentWorkbenchApi = {
+  list: () => api.get<AgentWorkbenchListResponse>('/agent-workbench'),
+  get: (requirementId: number, sinceId?: number) =>
+    api.get<AgentWorkbenchItem>(`/agent-workbench/${requirementId}`, {
+      params: sinceId ? { since_id: sinceId } : undefined,
+    }),
+}
+
 export const conversationsApi = {
   list: () => api.get<{ items: Conversation[]; total: number }>('/conversations'),
   get: (id: number) => api.get<Conversation>(`/conversations/${id}`),
+  getAgentContext: (id: number) => api.get<ChatAgentContext>(`/conversations/${id}/agent-context`),
   create: (data?: { title?: string; requirement_id?: number }) =>
     api.post<{ message: string; conversation: Conversation }>('/conversations', data || {}),
   delete: (id: number) => api.delete(`/conversations/${id}`),
@@ -308,7 +388,10 @@ export const conversationsApi = {
       params: lastId ? { last_id: lastId } : undefined,
     }),
   sendMessage: (id: number, content: string) =>
-    api.post<{ message: string; messages: Message[]; last_id: number }>(`/conversations/${id}/messages`, { content }),
+    api.post<{ message: string; messages: Message[]; last_id: number; agent_context?: ChatAgentContext | null }>(
+      `/conversations/${id}/messages`,
+      { content },
+    ),
 }
 
 export default api

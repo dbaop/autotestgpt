@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
-import { conversationsApi, Conversation, Message } from '../api'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { ChatAgentContext, conversationsApi, Conversation, Message } from '../api'
 
 const C = {
   bg: 'var(--bg-card)',
@@ -28,10 +29,16 @@ const AGENT_COLORS: Record<string, { color: string; bg: string; border: string; 
   exec_agent: { color: 'var(--accent-violet)', bg: 'rgba(139,92,246,0.1)', border: 'rgba(139,92,246,0.15)', label: 'EXEC' },
 }
 
+const isVisibleMessage = (msg: Message) =>
+  !msg.metadata?.hidden && !msg.content.startsWith('[系统提示]')
+
 export default function Chat() {
+  const location = useLocation()
+  const navigate = useNavigate()
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [currentConv, setCurrentConv] = useState<Conversation | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  const [agentContext, setAgentContext] = useState<ChatAgentContext | null>(null)
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -40,18 +47,38 @@ export default function Chat() {
   const sendingRef = useRef(false)
   const lastSentRef = useRef('')
   const lastSentTimeRef = useRef(0)
+  const contextPollRef = useRef<number | null>(null)
 
-  useEffect(() => {
-    loadConversations()
-    return () => { if (pollingRef.current) clearInterval(pollingRef.current) }
+  const loadAgentContext = useCallback(async (convId: number) => {
+    try {
+      const r = await conversationsApi.getAgentContext(convId)
+      setAgentContext(r.data)
+    } catch {
+      setAgentContext(null)
+    }
   }, [])
 
   useEffect(() => {
+    loadConversations()
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current)
+      if (contextPollRef.current) clearInterval(contextPollRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    const state = location.state as { conversationId?: number } | null
+    if (state?.conversationId) {
+      initializedRef.current = true
+      selectConversation(state.conversationId)
+      navigate(location.pathname, { replace: true, state: {} })
+      return
+    }
     if (conversations.length > 0 && !currentConv && !initializedRef.current) {
       initializedRef.current = true
       selectConversation(conversations[0].id)
     }
-  }, [conversations])
+  }, [conversations, location.state])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -75,8 +102,21 @@ export default function Chat() {
 
   const selectConversation = async (id: number) => {
     if (currentConv?.id === id) return
-    try { const r = await conversationsApi.get(id); setCurrentConv(r.data); setMessages(r.data.messages || []) }
-    catch { console.error('加载对话失败') }
+    if (contextPollRef.current) {
+      clearInterval(contextPollRef.current)
+      contextPollRef.current = null
+    }
+    try {
+      const r = await conversationsApi.get(id)
+      setCurrentConv(r.data)
+      setMessages((r.data.messages || []).filter(isVisibleMessage))
+      setAgentContext(r.data.agent_context || null)
+      if (r.data.requirement_id) {
+        contextPollRef.current = window.setInterval(() => loadAgentContext(id), 5000)
+      }
+    } catch {
+      console.error('加载对话失败')
+    }
   }
 
   const pollingRef = useRef<number | null>(null)
@@ -93,7 +133,8 @@ export default function Chat() {
     setInput(''); setLoading(true)
     try {
       const r = await conversationsApi.sendMessage(currentConv.id, userInput)
-      setMessages(r.data.messages || [])
+      setMessages((r.data.messages || []).filter(isVisibleMessage))
+      if (r.data.agent_context) setAgentContext(r.data.agent_context)
       lastSentRef.current = ''
     } catch { console.error('发送消息失败') }
     finally { sendingRef.current = false; setLoading(false) }
@@ -109,13 +150,23 @@ export default function Chat() {
     try {
       await conversationsApi.delete(id)
       setConversations(prev => prev.filter(c => c.id !== id))
-      if (currentConv?.id === id) { setCurrentConv(null); setMessages([]) }
+      if (currentConv?.id === id) {
+        setCurrentConv(null)
+        setMessages([])
+        setAgentContext(null)
+        if (contextPollRef.current) {
+          clearInterval(contextPollRef.current)
+          contextPollRef.current = null
+        }
+      }
     } catch { console.error('删除对话失败') }
   }
 
   const deduped = (() => {
     const seen = new Set<number>()
-    return messages.filter(m => { if (seen.has(m.id)) return false; seen.add(m.id); return true })
+    return messages
+      .filter(isVisibleMessage)
+      .filter(m => { if (seen.has(m.id)) return false; seen.add(m.id); return true })
   })()
 
   return (
@@ -195,6 +246,53 @@ export default function Chat() {
           )}
         </div>
       </div>
+
+      {/* Agent context strip — summary only, not full event log */}
+      {currentConv && (
+        <div style={{
+          width: 280, flexShrink: 0, borderRight: '1px solid var(--border-subtle)',
+          background: 'var(--bg-elevated)', display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        }}>
+          <div style={{ padding: '16px 14px', borderBottom: '1px solid var(--border-subtle)' }}>
+            <div style={{ fontFamily: C.mono, fontSize: 10, letterSpacing: '0.12em', color: C.cyan, marginBottom: 8 }}>
+              任务摘要
+            </div>
+            <p style={{ margin: 0, fontSize: 13, color: C.text, lineHeight: 1.5 }}>
+              {agentContext?.headline || '未关联需求；可在需求详情页打开对话协作。'}
+            </p>
+            {agentContext?.stats && (
+              <p style={{ margin: '10px 0 0', fontSize: 11, color: C.text3, fontFamily: C.mono }}>
+                用例 {agentContext.stats.cases} · UI脚本 {agentContext.stats.ui_scripts} · 缺陷 {agentContext.stats.defects}
+              </p>
+            )}
+            <Link
+              to={agentContext?.workbench_path || '/workbench'}
+              style={{
+                display: 'inline-block', marginTop: 12, fontFamily: C.mono, fontSize: 11,
+                color: C.violet, textDecoration: 'none',
+              }}
+            >
+              查看 Agent 工作台 →
+            </Link>
+          </div>
+          <div style={{ padding: '12px 14px', flex: 1, overflowY: 'auto' }}>
+            <div style={{ fontFamily: C.mono, fontSize: 10, color: C.amber, marginBottom: 8 }}>人工介入 / 待确认</div>
+            {!agentContext?.pending_questions?.length ? (
+              <p style={{ margin: 0, fontSize: 12, color: C.text3 }}>暂无待确认问题</p>
+            ) : (
+              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12, color: C.text2, lineHeight: 1.6 }}>
+                {agentContext.pending_questions.map((q, idx) => (
+                  <li key={q.id ?? idx} style={{ marginBottom: 8 }}>
+                    <span style={{ color: C.cyan, fontFamily: C.mono, fontSize: 10 }}>{q.agent}</span>
+                    <br />
+                    {q.message}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Right - chat area */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: 'var(--bg-surface)' }}>
@@ -342,17 +440,9 @@ export default function Chat() {
                 </button>
               </div>
 
-              {/* Agent legend */}
-              <div style={{ display: 'flex', gap: 12, marginTop: 12, flexWrap: 'wrap', paddingLeft: 4 }}>
-                {Object.entries(AGENT_COLORS).filter(([k]) => k !== 'user' && k !== 'router').map(([key, info]) => (
-                  <span key={key} style={{
-                    fontFamily: C.mono, fontSize: 9, color: info.color, background: info.bg,
-                    padding: '3px 8px', borderRadius: 6, border: `1px solid ${info.border}`,
-                  }}>
-                    {info.label}
-                  </span>
-                ))}
-              </div>
+              <p style={{ margin: '12px 0 0', fontSize: 11, color: C.text3, paddingLeft: 4 }}>
+                完整 Agent 事件与产物请在工作台查看；此处仅沟通与待确认项。
+              </p>
             </div>
           </>
         )}

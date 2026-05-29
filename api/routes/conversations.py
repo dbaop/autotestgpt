@@ -45,13 +45,11 @@ def create_conversation():
         welcome = Message(
             conversation_id=conversation.id,
             sender='router',
-            content='您好！我是 AutoTestGPT 智能测试助手。我有四个专业的 Agent 成员：\n\n'
-                    '- **ReqAgent**：需求分析师，帮您梳理和理解测试需求\n'
-                    '- **CaseAgent**：测试用例设计师，为您设计全面的测试用例\n'
-                    '- **CodeAgent**：代码工程师，生成可执行的自动化测试脚本\n'
-                    '- **ExecAgent**：执行分析师，运行测试并生成详细报告\n\n'
-                    '请告诉我您想要测试什么？我会协调各 Agent 为您服务。',
-            agent_type='router'
+            content='您好！我是 AutoTestGPT 对话助手。\n\n'
+                    '本页用于沟通与需要您确认的问题；完整 Agent 流水、产物与探活状态请查看 **Agent 工作台**。\n\n'
+                    '您可以：说明测试需求、补充测试地址/登录方式、回答验证码或权限相关问题。\n'
+                    '关联某条需求后，右侧会同步该任务的简要进度与待办。',
+            agent_type='router',
         )
         db.session.add(welcome)
         db.session.commit()
@@ -71,8 +69,11 @@ def get_conversation(conv_id):
         conversation = db.get_or_404(Conversation, conv_id)
         messages = Message.query.filter_by(conversation_id=conv_id).order_by(Message.created_at).all()
 
+        from service.chat_summary_service import build_chat_agent_context_for_conversation
+
         result = conversation.to_dict()
-        result['messages'] = [msg.to_dict() for msg in messages]
+        result['messages'] = [msg.to_dict() for msg in _visible_messages(messages)]
+        result['agent_context'] = build_chat_agent_context_for_conversation(conv_id)
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': '获取对话详情失败', 'message': str(e)}), 500
@@ -90,6 +91,29 @@ def delete_conversation(conv_id):
         return jsonify({'error': '删除对话失败', 'message': str(e)}), 500
 
 
+def get_agent_context(conv_id):
+    """返回对话关联需求的精简 Agent 上下文（摘要 + 待确认）。"""
+    try:
+        db.get_or_404(Conversation, conv_id)
+        from service.chat_summary_service import build_chat_agent_context_for_conversation
+
+        context = build_chat_agent_context_for_conversation(conv_id)
+        if not context:
+            return jsonify({
+                'requirement_id': None,
+                'headline': '未关联需求任务',
+                'pending_questions': [],
+                'workbench_path': '/workbench',
+            })
+        return jsonify(context)
+    except Exception as e:
+        return jsonify({'error': '获取 Agent 上下文失败', 'message': str(e)}), 500
+
+
+def _visible_messages(messages):
+    return [msg for msg in messages if not (msg.extra_data or {}).get('hidden')]
+
+
 def get_messages(conv_id):
     """获取对话消息"""
     try:
@@ -101,7 +125,7 @@ def get_messages(conv_id):
             Message.id > last_msg_id
         ).order_by(Message.created_at)
 
-        messages = query.all()
+        messages = _visible_messages(query.all())
         return jsonify({
             'items': [msg.to_dict() for msg in messages],
             'count': len(messages)
@@ -136,16 +160,25 @@ def send_message(conv_id):
                     'last_id': messages[-1].id if messages else 0
                 }), 200
 
-        # 调用 Agent 处理（Agent 内部会保存用户消息）
         from agent.chat_agent import process_user_message
-        result = process_user_message(conv_id, data['content'])
+        from service.chat_summary_service import (
+            build_chat_agent_context_for_conversation,
+            maybe_emit_waiting_user_from_chat,
+        )
 
-        # 返回更新后的消息列表
-        messages = Message.query.filter_by(conversation_id=conv_id).order_by(Message.created_at).all()
+        if conversation.requirement_id:
+            maybe_emit_waiting_user_from_chat(conversation.requirement_id, data['content'])
+
+        process_user_message(conv_id, data['content'])
+
+        messages = _visible_messages(
+            Message.query.filter_by(conversation_id=conv_id).order_by(Message.created_at).all()
+        )
         return jsonify({
             'message': '消息已发送',
             'messages': [msg.to_dict() for msg in messages],
-            'last_id': messages[-1].id if messages else 0
+            'last_id': messages[-1].id if messages else 0,
+            'agent_context': build_chat_agent_context_for_conversation(conv_id),
         })
     except Exception as e:
         db.session.rollback()

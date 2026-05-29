@@ -418,7 +418,8 @@ class ChatAgent:
                     conversation_id=conv_id,
                     sender='router',
                     content='[系统提示] CaseAgent 已完成测试用例设计。CodeAgent，准备好生成测试代码了吗？',
-                    agent_type='router'
+                    agent_type='router',
+                    extra_data={'hidden': True},
                 )
                 db.session.add(next_msg)
                 db.session.commit()

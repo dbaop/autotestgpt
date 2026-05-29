@@ -9,6 +9,7 @@ import RequirementDetail from './pages/RequirementDetail'
 import Chat from './pages/Chat'
 import CodeReviews from './pages/CodeReviews'
 import KnowledgeBases from './pages/KnowledgeBases'
+import AgentWorkbench from './pages/AgentWorkbench'
 
 export default function App() {
   return (
@@ -21,6 +22,8 @@ export default function App() {
           <Route path="knowledge-bases" element={<KnowledgeBases />} />
           <Route path="requirements" element={<Requirements />} />
           <Route path="requirements/:id" element={<RequirementDetail />} />
+          <Route path="workbench" element={<AgentWorkbench />} />
+          <Route path="workbench/:requirementId" element={<AgentWorkbench />} />
           <Route path="cases" element={<TestCases />} />
           <Route path="executions" element={<Executions />} />
           <Route path="chat" element={<Chat />} />

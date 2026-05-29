@@ -80,7 +80,7 @@ export default function Requirements() {
             <div style={{ fontFamily: C.mono, fontSize: 11, letterSpacing: '0.32em', color: 'var(--accent-cyan)', textTransform: 'uppercase', marginBottom: 10 }}>
               &gt; requirement_board
             </div>
-            <h2 style={{ fontFamily: C.display, fontSize: 32, fontWeight: 800, color: C.text, margin: '0 0 8px', letterSpacing: '-0.01em' }}>
+            <h2 style={{ fontFamily: C.display, fontSize: 32, fontWeight: 800, color: C.text, margin: '0 0 8px', letterSpacing: 0 }}>
               需求清单
             </h2>
             <p style={{ fontFamily: C.body, fontSize: 14, color: C.text2, margin: 0 }}>

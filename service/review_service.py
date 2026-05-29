@@ -123,6 +123,17 @@ def run_review_task(task_id: int):
         return {"status": "error", "task_id": task.id, "message": str(e)}
 
 
+def _run_review_task_in_context(flask_app, task_id: int):
+    with flask_app.app_context():
+        try:
+            run_review_task(task_id)
+        finally:
+            db.session.remove()
+
+
 def run_review_task_async(task_id: int):
-    _review_executor.submit(run_review_task, task_id)
+    from service.flow_service import _resolve_flask_app
+
+    flask_app = _resolve_flask_app()
+    _review_executor.submit(_run_review_task_in_context, flask_app, task_id)
     return {"status": "queued", "task_id": task_id}
