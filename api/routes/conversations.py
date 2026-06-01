@@ -110,6 +110,17 @@ def get_agent_context(conv_id):
         return jsonify({'error': '获取 Agent 上下文失败', 'message': str(e)}), 500
 
 
+def stream_conversation(conv_id):
+    """SSE 端点，实时推送 Agent 事件到前端。"""
+    try:
+        db.get_or_404(Conversation, conv_id)
+        from service.sse_service import create_sse_stream
+
+        return create_sse_stream(conv_id)
+    except Exception as e:
+        return jsonify({'error': 'SSE 连接失败', 'message': str(e)}), 500
+
+
 def _visible_messages(messages):
     return [msg for msg in messages if not (msg.extra_data or {}).get('hidden')]
 
@@ -165,12 +176,37 @@ def send_message(conv_id):
             build_chat_agent_context_for_conversation,
             maybe_emit_waiting_user_from_chat,
         )
+        from config import Config
 
         if conversation.requirement_id:
             maybe_emit_waiting_user_from_chat(conversation.requirement_id, data['content'])
 
-        process_user_message(conv_id, data['content'])
+        result = process_user_message(conv_id, data['content'])
 
+        # Orchestrator mode — push events via SSE, return 202
+        if isinstance(result, dict) and result.get("_orchestrator_mode"):
+            from service.sse_service import push_sse_event, broadcast_error
+            import threading
+
+            def _run_orchestrator():
+                from agent.orchestrator import process_user_message_flow
+                from flask import copy_current_request_context
+
+                try:
+                    for event in process_user_message_flow(conv_id, data['content']):
+                        push_sse_event(conv_id, event)
+                except Exception as exc:
+                    broadcast_error(conv_id, str(exc))
+
+            thread = threading.Thread(target=_run_orchestrator, daemon=True)
+            thread.start()
+
+            return jsonify({
+                'message': '已接收，Agent 正在处理...',
+                'orchestrator_mode': True,
+            }), 202
+
+        # Legacy chat mode
         messages = _visible_messages(
             Message.query.filter_by(conversation_id=conv_id).order_by(Message.created_at).all()
         )

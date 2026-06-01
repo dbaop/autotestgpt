@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Generator, List, Optional
 import litellm
 from config import Config
 
@@ -29,23 +29,65 @@ def _resolve_llm_config():
     return 'deepseek/deepseek-chat', None, None
 
 
+def load_agent_config(agent_type: str) -> dict | None:
+    """从数据库加载 Agent 的自定义配置。"""
+    try:
+        from models import AgentConfig, db
+        config = AgentConfig.query.filter_by(
+            agent_type=agent_type, is_enabled=True
+        ).first()
+        if config:
+            return config.to_dict()
+    except Exception:
+        pass
+    return None
+
+
 class BaseAgent(ABC):
     """基础智能体类"""
 
-    def __init__(self, model: str = "deepseek/deepseek-chat", temperature: float = 0.1):
+    def __init__(self, model: str = "deepseek/deepseek-chat", temperature: float = 0.1,
+                 force_model: Optional[str] = None, api_key: Optional[str] = None,
+                 api_base: Optional[str] = None, agent_type: Optional[str] = None):
         self.model = model
         self.temperature = temperature
         self.max_tokens = 4000
+        self.force_model = force_model
+        self._api_key = api_key
+        self._api_base = api_base
+        self.agent_type = agent_type
+        self.custom_system_prompt: Optional[str] = None
+        if agent_type:
+            self._apply_custom_config()
+
+    def _apply_custom_config(self):
+        """从数据库加载自定义配置并应用。"""
+        config = load_agent_config(self.agent_type)
+        if not config:
+            return
+        if config.get("system_prompt"):
+            self.custom_system_prompt = config["system_prompt"]
+        if config.get("model_name"):
+            self.force_model = config["model_name"]
+        if config.get("temperature") is not None:
+            self.temperature = config["temperature"]
+        if config.get("max_tokens") is not None:
+            self.max_tokens = config["max_tokens"]
 
     def call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> str:
-        """调用大模型，按优先级自动选择可用的 API"""
+        """调用大模型 — 优先使用实例指定的模型，否则按优先级自动选择"""
         try:
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
 
-            resolved_model, api_key, api_base = _resolve_llm_config()
+            if self.force_model:
+                resolved_model = self.force_model
+                api_key = self._api_key
+                api_base = self._api_base
+            else:
+                resolved_model, api_key, api_base = _resolve_llm_config()
 
             kwargs = dict(
                 model=resolved_model,
@@ -67,26 +109,145 @@ class BaseAgent(ABC):
             logger.error(f"LLM调用失败: {e}")
             raise
 
+    def call_llm_stream(
+        self, messages: List[Dict[str, str]]
+    ) -> Generator[str, None, None]:
+        token_count = 0
+        try:
+            if self.force_model:
+                resolved_model = self.force_model
+                api_key = self._api_key
+                api_base = self._api_base
+            else:
+                resolved_model, api_key, api_base = _resolve_llm_config()
+
+            kwargs = dict(
+                model=resolved_model,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                stream=True,
+            )
+            if api_key:
+                kwargs["api_key"] = api_key
+            if api_base:
+                kwargs["api_base"] = api_base
+
+            response = litellm.completion(**kwargs)
+            for chunk in response:
+                delta = getattr(chunk.choices[0].delta, "content", None)
+                if delta:
+                    token_count += 1
+                    yield delta
+            logger.info("LLM流式调用成功, token数: %s", token_count)
+
+        except Exception as e:
+            logger.error(f"LLM流式调用失败: {e}")
+            yield f"\n[LLM error: {e}]"
+
     def parse_json_response(self, response: str) -> Dict[str, Any]:
-        """从 LLM 响应中提取 JSON"""
+        """从 LLM 响应中提取 JSON（正确处理嵌套对象）"""
         import re
 
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1)
-        else:
+        # Try to find a fenced ```json ... ``` block with balanced braces
+        json_str = self._extract_fenced_json(response)
+
+        if json_str is None:
+            # Fallback: find the outermost { ... } using brace counting
             start = response.find('{')
-            end = response.rfind('}')
-            if start != -1 and end != -1 and end > start:
-                json_str = response[start:end + 1]
+            if start == -1:
+                # Try to find a JSON array
+                start = response.find('[')
+                if start != -1:
+                    json_str = self._extract_balanced(response, start, '[', ']')
             else:
-                json_str = response
+                json_str = self._extract_balanced(response, start, '{', '}')
+
+        if json_str is None:
+            json_str = response
 
         try:
             return json.loads(json_str)
         except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败: {e}, 响应内容: {response[:500]}...")
+            logger.error(f"JSON解析失败: {e}, 响应内容前500字符: {response[:500]}...")
             raise ValueError(f"无法解析模型响应为JSON: {e}")
+
+    @staticmethod
+    def _extract_fenced_json(response: str) -> Optional[str]:
+        """Extract JSON from a ```json ... ``` fenced block, handling nested braces."""
+        import re
+
+        for match in re.finditer(r'```(?:json)?\s*\n?', response):
+            fence_start = match.end()
+            brace_pos = response.find('{', fence_start)
+            bracket_pos = response.find('[', fence_start)
+            open_char = None
+            close_char = None
+
+            if brace_pos != -1 and (bracket_pos == -1 or brace_pos < bracket_pos):
+                start_pos = brace_pos
+                open_char, close_char = '{', '}'
+            elif bracket_pos != -1:
+                start_pos = bracket_pos
+                open_char, close_char = '[', ']'
+            else:
+                continue
+
+            # Find the matching closing ``` after the JSON
+            extracted = BaseAgent._extract_balanced(response, start_pos, open_char, close_char)
+            if extracted is None:
+                continue
+
+            # Verify there's a closing ``` after the extracted JSON
+            end_pos = start_pos + len(extracted)
+            remaining = response[end_pos:].strip()
+            if remaining.startswith('```'):
+                return extracted
+            # If no ``` found, still return if it looks like valid JSON
+            try:
+                json.loads(extracted)
+                return extracted
+            except json.JSONDecodeError:
+                continue
+
+        return None
+
+    @staticmethod
+    def _extract_balanced(text: str, start: int, open_char: str, close_char: str) -> Optional[str]:
+        """Extract a balanced bracket/brace pair starting from a given position."""
+        if start >= len(text) or text[start] != open_char:
+            return None
+
+        depth = 0
+        in_string = False
+        escape_next = False
+
+        for i in range(start, len(text)):
+            ch = text[i]
+
+            if escape_next:
+                escape_next = False
+                continue
+
+            if ch == '\\':
+                escape_next = True
+                continue
+
+            if ch == '"':
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if ch == open_char:
+                depth += 1
+            elif ch == close_char:
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+
+        return None
     
     def save_to_file(self, data: Dict[str, Any], file_path: str):
         """

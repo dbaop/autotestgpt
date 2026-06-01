@@ -10,6 +10,7 @@ import Chat from './pages/Chat'
 import CodeReviews from './pages/CodeReviews'
 import KnowledgeBases from './pages/KnowledgeBases'
 import AgentWorkbench from './pages/AgentWorkbench'
+import Settings from './pages/Settings'
 
 export default function App() {
   return (
@@ -27,6 +28,7 @@ export default function App() {
           <Route path="cases" element={<TestCases />} />
           <Route path="executions" element={<Executions />} />
           <Route path="chat" element={<Chat />} />
+          <Route path="settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

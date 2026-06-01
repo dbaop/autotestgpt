@@ -10,11 +10,12 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 from jinja2 import Environment, FileSystemLoader
 
-from .base_agent import BaseAgent
+from .tool_agent import ToolCapableAgent
+from .tools import format_tools_prompt
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -29,11 +30,11 @@ STATUS_MAP = {
 }
 
 
-class ExecAgent(BaseAgent):
-    """执行与报告智能体"""
+class ExecAgent(ToolCapableAgent):
+    """执行与报告智能体 — 支持工具调用"""
 
     def __init__(self):
-        super().__init__(model="gpt-4", temperature=0.1)
+        super().__init__(model="gpt-4", temperature=0.1, agent_type="exec_agent")
 
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -90,6 +91,23 @@ class ExecAgent(BaseAgent):
     # ------------------------------------------------------------------
     # 脚本执行
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # act() — interactive execution
+    # ------------------------------------------------------------------
+
+    def act(
+        self,
+        conversation_messages: List[Dict[str, str]],
+        system_instruction: str,
+    ) -> Generator[Dict[str, Any], Optional[str], None]:
+        """Interactive test execution with file reading and user questions."""
+        tools_prompt = format_tools_prompt(self._tools)
+        full_system = (
+            "You are a test execution engineer. Execute test scripts and report results.\n\n"
+            + tools_prompt
+        )
+        yield from super().act(conversation_messages, full_system)
 
     def execute_script(self, script_content: str, file_path: Optional[str] = None,
                        script_type: str = 'python', script_id: str = None) -> Dict[str, Any]:

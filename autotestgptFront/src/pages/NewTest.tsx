@@ -77,7 +77,9 @@ export default function NewTest() {
   const [newKnowledgeBaseDesc, setNewKnowledgeBaseDesc] = useState('')
   const [tagsInput, setTagsInput] = useState('login,sms')
   const [reviewEnabled, setReviewEnabled] = useState(false)
+  const [reviewRepoType, setReviewRepoType] = useState<'remote' | 'local'>('remote')
   const [reviewRepoUrl, setReviewRepoUrl] = useState('http://git.100credit.cn/group/demo-repo.git')
+  const [reviewRepoPath, setReviewRepoPath] = useState('')
   const [reviewBranch, setReviewBranch] = useState('main')
   const [reviewDays, setReviewDays] = useState(7)
   const [loading, setLoading] = useState(false)
@@ -97,12 +99,13 @@ export default function NewTest() {
       const hasRequirement = title.trim().length > 0 && demand.trim().length > 0
       if (!hasRequirement) return false
       if (!reviewEnabled) return true
+      if (reviewRepoType === 'local') return reviewRepoPath.trim().length > 0 && reviewBranch.trim().length > 0 && reviewDays > 0
       return reviewRepoUrl.trim().length > 0 && reviewBranch.trim().length > 0 && reviewDays > 0
     }
     if (!uploadFile) return false
     if (fileTarget === 'knowledge') return !!selectedKnowledgeBaseId
     return title.trim().length > 0
-  }, [demand, fileTarget, inputMode, reviewBranch, reviewDays, reviewEnabled, reviewRepoUrl, selectedKnowledgeBaseId, title, uploadFile])
+  }, [demand, fileTarget, inputMode, reviewBranch, reviewDays, reviewEnabled, reviewRepoType, reviewRepoUrl, reviewRepoPath, selectedKnowledgeBaseId, title, uploadFile])
 
   const selectedKnowledgeBase = useMemo(
     () => knowledgeBases.find(item => item.id === selectedKnowledgeBaseId) || null,
@@ -126,7 +129,11 @@ export default function NewTest() {
     const res = await flowApi.start({
       title: title.trim(), demand: demand.trim(), project_id: 1,
       knowledge_base_id: selectedKnowledgeBaseId || undefined,
-      review: reviewEnabled ? { repo_url: reviewRepoUrl.trim(), branch: reviewBranch.trim(), days: reviewDays } : undefined,
+      review: reviewEnabled ? (
+        reviewRepoType === 'local'
+          ? { repo_path: reviewRepoPath.trim(), branch: reviewBranch.trim(), days: reviewDays }
+          : { repo_url: reviewRepoUrl.trim(), branch: reviewBranch.trim(), days: reviewDays }
+      ) : undefined,
     })
     navigate(`/requirements/${res.data.requirement_id}`)
   }
@@ -359,33 +366,70 @@ export default function NewTest() {
                 </div>
 
                 {reviewEnabled && (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginTop: 16 }}>
-                    <div>
-                      <label style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, display: 'block', marginBottom: 6 }}>git_repo_url</label>
-                      <input value={reviewRepoUrl} onChange={e => setReviewRepoUrl(e.target.value)}
-                        style={{
-                          width: '100%', padding: '12px 16px', background: 'rgba(255,255,255,0.03)',
-                          border: '1px solid var(--border-subtle)', borderRadius: 12, color: C.text, fontFamily: C.mono, fontSize: 13,
-                        }}
-                      />
+                  <div style={{ marginTop: 16 }}>
+                    {/* Repo type tab switcher */}
+                    <div style={{ display: 'flex', gap: 0, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border-subtle)', marginBottom: 12 }}>
+                      <button type="button" onClick={() => setReviewRepoType('remote')} style={{
+                        flex: 1, padding: '8px 12px', border: 'none', cursor: 'pointer',
+                        fontFamily: C.mono, fontSize: 10, fontWeight: 700, letterSpacing: '0.06em',
+                        color: reviewRepoType === 'remote' ? '#050810' : C.text3,
+                        background: reviewRepoType === 'remote' ? 'var(--accent-violet)' : 'rgba(255,255,255,0.02)',
+                        transition: 'all 0.2s',
+                      }}>
+                        REMOTE URL
+                      </button>
+                      <button type="button" onClick={() => setReviewRepoType('local')} style={{
+                        flex: 1, padding: '8px 12px', border: 'none', cursor: 'pointer',
+                        fontFamily: C.mono, fontSize: 10, fontWeight: 700, letterSpacing: '0.06em',
+                        color: reviewRepoType === 'local' ? '#050810' : C.text3,
+                        background: reviewRepoType === 'local' ? 'var(--accent-cyan)' : 'rgba(255,255,255,0.02)',
+                        transition: 'all 0.2s',
+                      }}>
+                        LOCAL PATH
+                      </button>
                     </div>
-                    <div>
-                      <label style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, display: 'block', marginBottom: 6 }}>branch</label>
-                      <input value={reviewBranch} onChange={e => setReviewBranch(e.target.value)}
-                        style={{
-                          width: '100%', padding: '12px 16px', background: 'rgba(255,255,255,0.03)',
-                          border: '1px solid var(--border-subtle)', borderRadius: 12, color: C.text, fontFamily: C.mono, fontSize: 13,
-                        }}
-                      />
-                    </div>
-                    <div>
-                      <label style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, display: 'block', marginBottom: 6 }}>days</label>
-                      <input type="number" min={1} value={reviewDays} onChange={e => setReviewDays(Number(e.target.value))}
-                        style={{
-                          width: '100%', padding: '12px 16px', background: 'rgba(255,255,255,0.03)',
-                          border: '1px solid var(--border-subtle)', borderRadius: 12, color: C.text, fontFamily: C.mono, fontSize: 13,
-                        }}
-                      />
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                      <div>
+                        <label style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, display: 'block', marginBottom: 6 }}>
+                          {reviewRepoType === 'remote' ? 'git_repo_url' : 'local_repo_path'}
+                        </label>
+                        {reviewRepoType === 'remote' ? (
+                          <input value={reviewRepoUrl} onChange={e => setReviewRepoUrl(e.target.value)}
+                            placeholder="https://github.com/org/repo.git"
+                            style={{
+                              width: '100%', padding: '12px 16px', background: 'rgba(255,255,255,0.03)',
+                              border: '1px solid var(--border-subtle)', borderRadius: 12, color: C.text, fontFamily: C.mono, fontSize: 13,
+                            }}
+                          />
+                        ) : (
+                          <input value={reviewRepoPath} onChange={e => setReviewRepoPath(e.target.value)}
+                            placeholder="D:/projects/my-repo"
+                            style={{
+                              width: '100%', padding: '12px 16px', background: 'rgba(255,255,255,0.03)',
+                              border: '1px solid var(--border-subtle)', borderRadius: 12, color: C.text, fontFamily: C.mono, fontSize: 13,
+                            }}
+                          />
+                        )}
+                      </div>
+                      <div>
+                        <label style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, display: 'block', marginBottom: 6 }}>branch</label>
+                        <input value={reviewBranch} onChange={e => setReviewBranch(e.target.value)}
+                          style={{
+                            width: '100%', padding: '12px 16px', background: 'rgba(255,255,255,0.03)',
+                            border: '1px solid var(--border-subtle)', borderRadius: 12, color: C.text, fontFamily: C.mono, fontSize: 13,
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, display: 'block', marginBottom: 6 }}>days</label>
+                        <input type="number" min={1} value={reviewDays} onChange={e => setReviewDays(Number(e.target.value))}
+                          style={{
+                            width: '100%', padding: '12px 16px', background: 'rgba(255,255,255,0.03)',
+                            border: '1px solid var(--border-subtle)', borderRadius: 12, color: C.text, fontFamily: C.mono, fontSize: 13,
+                          }}
+                        />
+                      </div>
                     </div>
                   </div>
                 )}
@@ -453,7 +497,7 @@ export default function NewTest() {
               <InfoRow label="输入模式" value={inputMode === 'text' ? '直接输入需求' : '导入文件'} />
               <InfoRow label="文件目标" value={inputMode === 'text' ? '直接跑流程' : fileTarget === 'requirement' ? '创建 Requirement' : '沉淀到知识库'} />
               <InfoRow label="绑定知识库" value={selectedKnowledgeBase?.name || '未绑定'} />
-              <InfoRow label="代码 Review" value={reviewEnabled ? `${reviewBranch} / ${reviewDays}d` : '未纳入'} />
+              <InfoRow label="代码 Review" value={reviewEnabled ? (reviewRepoType === 'local' ? '本地仓库' : '远程仓库') + ` / ${reviewBranch} / ${reviewDays}d` : '未纳入'} />
               <InfoRow label="选中文件" value={uploadFile?.name || '未选择文件'} />
             </div>
           </section>

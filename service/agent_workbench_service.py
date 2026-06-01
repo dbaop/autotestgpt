@@ -301,6 +301,8 @@ def build_requirement_workbench(requirement: Requirement) -> dict[str, Any]:
         "environment": environment,
         "review": {
             "repo_url": review_task.repo_url if review_task else None,
+            "repo_path": review_task.repo_path if review_task else None,
+            "repo_type": review_task.repo_type if review_task else None,
             "branch": review_task.branch if review_task else None,
             "days": review_task.days if review_task else None,
             "status": review_task.status if review_task else None,

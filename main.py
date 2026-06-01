@@ -84,36 +84,93 @@ def ensure_database_structure():
     with app.app_context():
         try:
             db.session.execute(text('SELECT 1 FROM requirements LIMIT 1'))
-            _ensure_required_columns()
-            db.create_all()
-            _ensure_default_project()
-            app.logger.info('Database schema is ready')
         except (OperationalError, ProgrammingError):
             app.logger.info('Database tables not found, creating new tables')
             db.create_all()
             app.logger.info('Database tables created')
             _ensure_default_project()
 
+        # Always run column migrations — wraps each call so a missing table
+        # doesn't block remaining migrations.
+        _ensure_all_columns()
+        db.create_all()
+        _ensure_default_project()
+        app.logger.info('Database schema is ready')
 
-def _ensure_required_columns():
-    _ensure_column(
-        table_name='requirements',
-        column_name='execution_progress',
-        sqlite_ddl='ALTER TABLE requirements ADD COLUMN execution_progress JSON',
-        mysql_ddl='ALTER TABLE requirements ADD COLUMN execution_progress JSON NULL',
-    )
-    _ensure_column(
-        table_name='requirements',
-        column_name='knowledge_base_id',
-        sqlite_ddl='ALTER TABLE requirements ADD COLUMN knowledge_base_id INTEGER',
-        mysql_ddl='ALTER TABLE requirements ADD COLUMN knowledge_base_id INTEGER NULL',
-    )
-    db.create_all()
+
+def _ensure_all_columns():
+    """安全地执行所有列迁移 — 每步独立 try/except，单步失败不影响后续。"""
+    migrations = [
+        ('requirements', 'execution_progress',
+         'ALTER TABLE requirements ADD COLUMN execution_progress JSON',
+         'ALTER TABLE requirements ADD COLUMN execution_progress JSON NULL'),
+        ('requirements', 'knowledge_base_id',
+         'ALTER TABLE requirements ADD COLUMN knowledge_base_id INTEGER',
+         'ALTER TABLE requirements ADD COLUMN knowledge_base_id INTEGER NULL'),
+        ('code_review_tasks', 'repo_path',
+         'ALTER TABLE code_review_tasks ADD COLUMN repo_path VARCHAR(1000)',
+         'ALTER TABLE code_review_tasks ADD COLUMN repo_path VARCHAR(1000) NULL'),
+        ('code_review_tasks', 'repo_type',
+         "ALTER TABLE code_review_tasks ADD COLUMN repo_type VARCHAR(20) DEFAULT 'remote'",
+         "ALTER TABLE code_review_tasks ADD COLUMN repo_type VARCHAR(20) DEFAULT 'remote'"),
+        ('code_review_findings', 'category',
+         'ALTER TABLE code_review_findings ADD COLUMN category VARCHAR(50)',
+         'ALTER TABLE code_review_findings ADD COLUMN category VARCHAR(50) NULL'),
+        ('code_review_findings', 'review_type',
+         'ALTER TABLE code_review_findings ADD COLUMN review_type VARCHAR(50)',
+         'ALTER TABLE code_review_findings ADD COLUMN review_type VARCHAR(50) NULL'),
+        ('code_review_findings', 'suggestion',
+         'ALTER TABLE code_review_findings ADD COLUMN suggestion TEXT',
+         'ALTER TABLE code_review_findings ADD COLUMN suggestion TEXT NULL'),
+        ('requirements', 'current_phase',
+         "ALTER TABLE requirements ADD COLUMN current_phase VARCHAR(50) DEFAULT 'idle'",
+         "ALTER TABLE requirements ADD COLUMN current_phase VARCHAR(50) DEFAULT 'idle'"),
+        ('requirements', 'conversation_messages',
+         'ALTER TABLE requirements ADD COLUMN conversation_messages JSON',
+         'ALTER TABLE requirements ADD COLUMN conversation_messages JSON NULL'),
+    ]
+    for table, col, sqlite_ddl, mysql_ddl in migrations:
+        try:
+            _ensure_column(table, col, sqlite_ddl, mysql_ddl)
+        except Exception as exc:
+            app.logger.warning("Column migration skipped [%s.%s]: %s", table, col, exc)
+
+    try:
+        _ensure_agent_configs_table()
+    except Exception as exc:
+        app.logger.warning("agent_configs table creation skipped: %s", exc)
+
+
+def _ensure_agent_configs_table():
+    inspector = inspect(db.engine)
+    if 'agent_configs' in inspector.get_table_names():
+        return
+    dialect = db.engine.dialect.name
+    if dialect == 'mysql':
+        db.session.execute(text(
+            'CREATE TABLE IF NOT EXISTS agent_configs (id INT AUTO_INCREMENT PRIMARY KEY, '
+            'agent_type VARCHAR(50) NOT NULL, project_id INT, system_prompt TEXT, '
+            'model_name VARCHAR(100), temperature FLOAT DEFAULT 0.1, '
+            'max_tokens INT DEFAULT 4000, is_enabled BOOLEAN DEFAULT 1, '
+            'extra_config JSON, created_at DATETIME, updated_at DATETIME)'
+        ))
+    else:
+        db.session.execute(text(
+            'CREATE TABLE IF NOT EXISTS agent_configs (id INTEGER PRIMARY KEY AUTOINCREMENT, '
+            'agent_type VARCHAR(50) NOT NULL, project_id INTEGER, system_prompt TEXT, '
+            'model_name VARCHAR(100), temperature FLOAT DEFAULT 0.1, '
+            'max_tokens INTEGER DEFAULT 4000, is_enabled BOOLEAN DEFAULT 1, '
+            'extra_config JSON, created_at DATETIME, updated_at DATETIME)'
+        ))
+    db.session.commit()
 
 
 def _ensure_column(table_name, column_name, sqlite_ddl, mysql_ddl):
     inspector = inspect(db.engine)
-    existing_columns = {col['name'] for col in inspector.get_columns(table_name)}
+    try:
+        existing_columns = {col['name'] for col in inspector.get_columns(table_name)}
+    except Exception:
+        return  # table doesn't exist yet — db.create_all() will handle it
     if column_name in existing_columns:
         return
     dialect = db.engine.dialect.name

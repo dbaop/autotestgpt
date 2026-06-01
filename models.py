@@ -27,6 +27,8 @@ class Requirement(db.Model):
     execution_progress = db.Column(db.JSON)
     project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True)
     knowledge_base_id = db.Column(db.Integer, db.ForeignKey('knowledge_bases.id'), nullable=True)
+    current_phase = db.Column(db.String(50), default='idle')
+    conversation_messages = db.Column(db.JSON)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -48,6 +50,7 @@ class Requirement(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'test_case_count': len(self.test_cases),
+            'current_phase': self.current_phase,
         }
 
 
@@ -286,7 +289,9 @@ class CodeReviewTask(db.Model):
     __tablename__ = 'code_review_tasks'
 
     id = db.Column(db.Integer, primary_key=True)
-    repo_url = db.Column(db.String(500), nullable=False)
+    repo_url = db.Column(db.String(500), nullable=True)
+    repo_path = db.Column(db.String(1000), nullable=True)
+    repo_type = db.Column(db.String(20), nullable=False, default='remote')
     branch = db.Column(db.String(200), nullable=False, default='main')
     days = db.Column(db.Integer, nullable=False, default=7)
     status = db.Column(db.String(50), default='pending')
@@ -302,6 +307,8 @@ class CodeReviewTask(db.Model):
         return {
             'id': self.id,
             'repo_url': self.repo_url,
+            'repo_path': self.repo_path,
+            'repo_type': self.repo_type,
             'branch': self.branch,
             'days': self.days,
             'status': self.status,
@@ -322,6 +329,9 @@ class CodeReviewFinding(db.Model):
     commit_sha = db.Column(db.String(100))
     file_path = db.Column(db.String(1000))
     severity = db.Column(db.String(30), default='info')
+    category = db.Column(db.String(50))
+    review_type = db.Column(db.String(50))
+    suggestion = db.Column(db.Text)
     title = db.Column(db.String(300), nullable=False)
     detail = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
@@ -333,6 +343,9 @@ class CodeReviewFinding(db.Model):
             'commit_sha': self.commit_sha,
             'file_path': self.file_path,
             'severity': self.severity,
+            'category': self.category,
+            'review_type': self.review_type,
+            'suggestion': self.suggestion,
             'title': self.title,
             'detail': self.detail,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -462,6 +475,37 @@ class FixSuggestion(db.Model):
             'target_files': self.target_files or [],
             'patch_preview': self.patch_preview,
             'confidence': self.confidence,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class AgentConfig(db.Model):
+    __tablename__ = 'agent_configs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    agent_type = db.Column(db.String(50), nullable=False)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True)
+    system_prompt = db.Column(db.Text)
+    model_name = db.Column(db.String(100))
+    temperature = db.Column(db.Float, default=0.1)
+    max_tokens = db.Column(db.Integer, default=4000)
+    is_enabled = db.Column(db.Boolean, default=True)
+    extra_config = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'agent_type': self.agent_type,
+            'project_id': self.project_id,
+            'system_prompt': self.system_prompt,
+            'model_name': self.model_name,
+            'temperature': self.temperature,
+            'max_tokens': self.max_tokens,
+            'is_enabled': self.is_enabled,
+            'extra_config': self.extra_config or {},
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }

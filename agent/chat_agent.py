@@ -439,5 +439,19 @@ def get_chat_agent() -> ChatAgent:
 
 
 def process_user_message(conversation_id: int, user_message: str) -> Dict[str, Any]:
-    """处理用户消息的便捷函数"""
+    """处理用户消息的便捷函数。
+
+    当 CONVERSATION_FLOW_ENABLED 打开时，走 Orchestrator 模式；
+    关闭时保持旧 ChatAgent 行为。
+    """
+    from config import Config
+
+    if Config.CONVERSATION_FLOW_ENABLED:
+        # Orchestrator mode — return a flag so the API route knows to use SSE
+        return {
+            "_orchestrator_mode": True,
+            "conversation_id": conversation_id,
+            "user_message": user_message,
+        }
+
     return get_chat_agent().process_user_message(conversation_id, user_message)

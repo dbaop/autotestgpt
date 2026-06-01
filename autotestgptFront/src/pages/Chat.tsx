@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { ChatAgentContext, conversationsApi, Conversation, Message } from '../api'
+import { ChatAgentContext, conversationsApi, Conversation, Message, SSEEvent } from '../api'
 
 const C = {
   bg: 'var(--bg-card)',
@@ -32,6 +32,12 @@ const AGENT_COLORS: Record<string, { color: string; bg: string; border: string; 
 const isVisibleMessage = (msg: Message) =>
   !msg.metadata?.hidden && !msg.content.startsWith('[系统提示]')
 
+const PHASE_LABELS: Record<string, string> = {
+  idle: '空闲', clarifying: '等待确认', parsing: '解析需求',
+  designing_cases: '设计用例', generating_code: '生成脚本',
+  executing: '执行测试', reviewing: '代码审查', completed: '完成',
+}
+
 export default function Chat() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -42,12 +48,18 @@ export default function Chat() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [streamingContent, setStreamingContent] = useState('')
+  const [streamingAgent, setStreamingAgent] = useState('')
+  const [currentPhase, setCurrentPhase] = useState('')
+  const [toolCalls, setToolCalls] = useState<{ name: string; result?: any; active: boolean }[]>([])
+  const [activeQuestion, setActiveQuestion] = useState<{ question: string; context: string } | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const initializedRef = useRef(false)
   const sendingRef = useRef(false)
   const lastSentRef = useRef('')
   const lastSentTimeRef = useRef(0)
   const contextPollRef = useRef<number | null>(null)
+  const sseRef = useRef<EventSource | null>(null)
 
   const loadAgentContext = useCallback(async (convId: number) => {
     try {
@@ -58,10 +70,90 @@ export default function Chat() {
     }
   }, [])
 
+  // SSE connection
+  const connectSSE = useCallback((convId: number) => {
+    if (sseRef.current) { sseRef.current.close(); sseRef.current = null }
+    setStreamingContent(''); setStreamingAgent(''); setToolCalls([])
+    setActiveQuestion(null); setCurrentPhase('')
+
+    const es = new EventSource(conversationsApi.streamUrl(convId))
+    sseRef.current = es
+
+    es.onmessage = (event) => {
+      try {
+        const data: SSEEvent = JSON.parse(event.data)
+        switch (data.type) {
+          case 'heartbeat': break
+          case 'message':
+            if (data.chunk) {
+              // Accumulate streaming tokens
+              setStreamingContent(prev => prev + (data.content || ''))
+              if (data.agent) setStreamingAgent(data.agent)
+            } else if (data.complete) {
+              // Flush accumulated streaming to a full message
+              setStreamingContent('')
+              setStreamingAgent('')
+              // Reload messages to get the saved message with ID
+              if (currentConv?.id) loadMessages(currentConv.id)
+            }
+            break
+          case 'tool_call':
+            setToolCalls(prev => [...prev, { name: data.name || '', active: true }])
+            break
+          case 'tool_result':
+            setToolCalls(prev => prev.map(tc =>
+              tc.name === data.name && tc.active ? { ...tc, result: data.result, active: false } : tc
+            ))
+            break
+          case 'question':
+            setActiveQuestion({ question: data.question || '', context: data.context || '' })
+            setLoading(false)
+            break
+          case 'artifact':
+            setToolCalls(prev => [...prev, {
+              name: `artifact:${data.key || ''}`,
+              result: data.data,
+              active: false,
+            }])
+            break
+          case 'phase_change':
+            setCurrentPhase(data.to || '')
+            break
+          case 'error':
+            console.error('SSE error event:', data.message)
+            setLoading(false)
+            break
+          case 'done':
+            setLoading(false)
+            setStreamingContent('')
+            // Reload full message list
+            if (currentConv?.id) loadMessages(currentConv.id)
+            break
+        }
+      } catch { /* ignore parse errors */ }
+    }
+
+    es.onerror = () => {
+      // SSE connection lost — fall back to polling
+      if (sseRef.current) { sseRef.current.close(); sseRef.current = null }
+      if (convId && currentConv?.requirement_id) {
+        contextPollRef.current = window.setInterval(() => loadAgentContext(convId), 5000)
+      }
+    }
+  }, [currentConv?.id])
+
+  const loadMessages = async (convId: number) => {
+    try {
+      const r = await conversationsApi.getMessages(convId)
+      setMessages((r.data.items || []).filter(isVisibleMessage))
+      await loadAgentContext(convId)
+    } catch { /* ignore */ }
+  }
+
   useEffect(() => {
     loadConversations()
     return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current)
+      if (sseRef.current) sseRef.current.close()
       if (contextPollRef.current) clearInterval(contextPollRef.current)
     }
   }, [])
@@ -82,7 +174,7 @@ export default function Chat() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, streamingContent, toolCalls])
 
   const loadConversations = async () => {
     try { const r = await conversationsApi.list(); setConversations(r.data.items) }
@@ -102,24 +194,22 @@ export default function Chat() {
 
   const selectConversation = async (id: number) => {
     if (currentConv?.id === id) return
-    if (contextPollRef.current) {
-      clearInterval(contextPollRef.current)
-      contextPollRef.current = null
-    }
+    if (contextPollRef.current) { clearInterval(contextPollRef.current); contextPollRef.current = null }
     try {
       const r = await conversationsApi.get(id)
       setCurrentConv(r.data)
       setMessages((r.data.messages || []).filter(isVisibleMessage))
       setAgentContext(r.data.agent_context || null)
+      setStreamingContent(''); setStreamingAgent(''); setToolCalls([])
+      setActiveQuestion(null); setCurrentPhase('')
+      // Connect SSE for real-time streaming
+      connectSSE(id)
+      // Fallback polling for agent context
       if (r.data.requirement_id) {
         contextPollRef.current = window.setInterval(() => loadAgentContext(id), 5000)
       }
-    } catch {
-      console.error('加载对话失败')
-    }
+    } catch { console.error('加载对话失败') }
   }
-
-  const pollingRef = useRef<number | null>(null)
 
   const doSendMessage = async () => {
     const userInput = input.trim()
@@ -131,13 +221,32 @@ export default function Chat() {
     lastSentRef.current = userInput
     lastSentTimeRef.current = now
     setInput(''); setLoading(true)
+    setActiveQuestion(null)
+
+    // Add user message optimistically
+    const tempUserMsg: Message = {
+      id: Date.now(),
+      conversation_id: currentConv.id,
+      sender: 'user',
+      content: userInput,
+      created_at: new Date().toISOString(),
+    }
+    setMessages(prev => [...prev, tempUserMsg])
+
     try {
       const r = await conversationsApi.sendMessage(currentConv.id, userInput)
-      setMessages((r.data.messages || []).filter(isVisibleMessage))
-      if (r.data.agent_context) setAgentContext(r.data.agent_context)
+      if (r.data.orchestrator_mode) {
+        // Orchestrator mode — events come via SSE, no need to reload messages now
+        if (r.data.agent_context) setAgentContext(r.data.agent_context)
+      } else if (r.data.messages) {
+        // Legacy mode — update from response
+        setMessages(r.data.messages.filter(isVisibleMessage))
+        if (r.data.agent_context) setAgentContext(r.data.agent_context)
+        setLoading(false)
+      }
       lastSentRef.current = ''
-    } catch { console.error('发送消息失败') }
-    finally { sendingRef.current = false; setLoading(false) }
+    } catch { console.error('发送消息失败'); setLoading(false) }
+    finally { sendingRef.current = false }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -151,13 +260,10 @@ export default function Chat() {
       await conversationsApi.delete(id)
       setConversations(prev => prev.filter(c => c.id !== id))
       if (currentConv?.id === id) {
-        setCurrentConv(null)
-        setMessages([])
-        setAgentContext(null)
-        if (contextPollRef.current) {
-          clearInterval(contextPollRef.current)
-          contextPollRef.current = null
-        }
+        setCurrentConv(null); setMessages([]); setAgentContext(null)
+        setStreamingContent(''); setActiveQuestion(null)
+        if (sseRef.current) { sseRef.current.close(); sseRef.current = null }
+        if (contextPollRef.current) { clearInterval(contextPollRef.current); contextPollRef.current = null }
       }
     } catch { console.error('删除对话失败') }
   }
@@ -383,8 +489,100 @@ export default function Chat() {
                 )
               })}
 
+              {/* Phase indicator */}
+              {currentPhase && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 16px',
+                  background: 'rgba(0,212,255,0.06)', borderRadius: 12,
+                  border: '1px solid rgba(0,212,255,0.15)', alignSelf: 'center',
+                }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: '50%',
+                    background: 'var(--accent-cyan)', animation: 'pulse 1.5s infinite',
+                  }} />
+                  <span style={{ fontFamily: C.mono, fontSize: 11, color: C.cyan }}>
+                    当前阶段: {PHASE_LABELS[currentPhase] || currentPhase}
+                  </span>
+                </div>
+              )}
+
+              {/* Tool call cards */}
+              {toolCalls.filter(tc => tc.active || tc.result).map((tc, idx) => (
+                <div key={idx} style={{
+                  display: 'flex', gap: 12, alignItems: 'flex-start',
+                  padding: '10px 16px', borderRadius: 12,
+                  background: 'rgba(255,176,32,0.06)', border: '1px solid rgba(255,176,32,0.15)',
+                  alignSelf: 'center', maxWidth: '80%',
+                }}>
+                  <span style={{ fontFamily: C.mono, fontSize: 11, color: C.amber, fontWeight: 700 }}>
+                    {tc.active ? '⚙ 执行工具' : '✓ 工具完成'}
+                  </span>
+                  <span style={{ fontFamily: C.mono, fontSize: 11, color: C.text2 }}>{tc.name}</span>
+                  {tc.result && (
+                    <span style={{ fontFamily: C.mono, fontSize: 10, color: C.text3 }}>
+                      ({typeof tc.result === 'object'
+                        ? (tc.result as any)?.length !== undefined
+                          ? (tc.result as any).length + ' 条结果'
+                          : '完成'
+                        : tc.result})
+                    </span>
+                  )}
+                </div>
+              ))}
+
+              {/* Active question card */}
+              {activeQuestion && (
+                <div style={{
+                  padding: '16px 20px', borderRadius: 16,
+                  background: 'rgba(139,92,246,0.08)', border: '2px solid rgba(139,92,246,0.3)',
+                  alignSelf: 'center', maxWidth: '85%',
+                }}>
+                  <div style={{ fontFamily: C.mono, fontSize: 10, color: C.violet, marginBottom: 8 }}>
+                    ⏳ Agent 需要你的确认
+                  </div>
+                  <div style={{ fontFamily: C.body, fontSize: 13, color: C.text, lineHeight: 1.6 }}>
+                    {activeQuestion.question}
+                  </div>
+                  {activeQuestion.context && (
+                    <div style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, marginTop: 6 }}>
+                      {activeQuestion.context}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Streaming message */}
+              {streamingContent && (
+                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                  <div style={{
+                    width: 40, height: 40, borderRadius: 12, flexShrink: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: 'rgba(56,189,248,0.1)', border: '1px solid rgba(56,189,248,0.15)',
+                  }}>
+                    <span style={{ fontFamily: C.mono, fontSize: 10, fontWeight: 800, color: '#38bdf8' }}>
+                      {streamingAgent ? streamingAgent.replace('_agent', '').toUpperCase().slice(0, 4) : 'AI'}
+                    </span>
+                  </div>
+                  <div style={{ maxWidth: '65%' }}>
+                    <div style={{
+                      padding: '14px 18px', borderRadius: '4px 16px 16px 16px',
+                      background: 'rgba(56,189,248,0.06)', border: '1px solid rgba(56,189,248,0.12)',
+                    }}>
+                      <pre style={{ margin: 0, fontFamily: C.mono, fontSize: 12, color: C.text,
+                        whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
+                        {streamingContent}
+                        <span className="cursor-blink" style={{
+                          display: 'inline-block', width: 8, height: 16,
+                          background: 'var(--accent-cyan)', marginLeft: 2, verticalAlign: 'middle',
+                        }} />
+                      </pre>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Loading indicator */}
-              {loading && (
+              {loading && !streamingContent && (
                 <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
                   <div style={{
                     width: 40, height: 40, borderRadius: 12, background: 'rgba(139,92,246,0.1)',

@@ -54,6 +54,14 @@ class FlowDataAccess:
         return TestCase.query.filter_by(requirement_id=req_id).all()
 
     @staticmethod
+    def load_test_environment(req_id: int) -> dict:
+        """从 Requirement.execution_progress 读取测试环境配置。"""
+        requirement = db.session.get(Requirement, req_id)
+        if requirement and requirement.execution_progress:
+            return requirement.execution_progress.get("test_environment") or {}
+        return {}
+
+    @staticmethod
     def get_scripts_for_requirement(req_id: int):
         cases = TestCase.query.filter_by(requirement_id=req_id).all()
         case_ids = [c.id for c in cases]
@@ -92,10 +100,13 @@ class FlowDataAccess:
             if not test_case_id and cases:
                 test_case_id = cases[0].id
             if test_case_id:
+                code = script_data.get('code', '')
+                if isinstance(code, list):
+                    code = '\n'.join(str(line) for line in code)
                 ts = TestScript(
                     test_case_id=test_case_id,
                     script_type=script_data.get('language', 'python'),
-                    script_content=script_data.get('code', ''),
+                    script_content=code,
                     file_path=script_data.get('file_path', ''),
                     status='generated',
                 )
@@ -116,9 +127,11 @@ class FlowDataAccess:
         return record
 
     @staticmethod
-    def create_review_task(repo_url: str, branch: str, days: int):
+    def create_review_task(repo_url: str, branch: str, days: int, repo_path: str = "", repo_type: str = "remote"):
         task = CodeReviewTask(
-            repo_url=repo_url,
+            repo_url=repo_url or None,
+            repo_path=repo_path or None,
+            repo_type=repo_type,
             branch=branch,
             days=days,
             status='pending',
@@ -322,12 +335,14 @@ class AutoTestFlow:
         if not review_data and input_data.get('review_repo_url'):
             review_data = {
                 'repo_url': input_data.get('review_repo_url'),
+                'repo_path': input_data.get('review_repo_path'),
                 'branch': input_data.get('review_branch'),
                 'days': input_data.get('review_days'),
             }
 
         repo_url = (review_data.get('repo_url') or '').strip() if isinstance(review_data, dict) else ''
-        if not repo_url:
+        repo_path = (review_data.get('repo_path') or '').strip() if isinstance(review_data, dict) else ''
+        if not repo_url and not repo_path:
             return None
 
         branch = (review_data.get('branch') or 'main').strip()
@@ -336,7 +351,14 @@ class AutoTestFlow:
         except (TypeError, ValueError):
             days = 7
 
-        return {'repo_url': repo_url, 'branch': branch or 'main', 'days': max(days, 1)}
+        config = {'branch': branch or 'main', 'days': max(days, 1)}
+        if repo_path:
+            config['repo_path'] = repo_path
+            config['repo_type'] = 'local'
+        else:
+            config['repo_url'] = repo_url
+            config['repo_type'] = 'remote'
+        return config
 
     # ------------------------------------------------------------------
     # 各步骤
@@ -390,7 +412,11 @@ class AutoTestFlow:
         logger.info(f"步骤3: 生成测试代码 (需求ID: {requirement_id})")
         _emit_event(requirement_id, 'CodeAgent', 'started', '开始生成 Playwright/API 脚本')
         try:
-            test_scripts = self.code_agent.process({'test_cases': test_cases})
+            env = self.da.load_test_environment(requirement_id)
+            test_scripts = self.code_agent.process({
+                'test_cases': test_cases,
+                'test_environment': env,
+            })
             self.da.save_scripts(test_scripts.get('scripts', []), requirement_id)
             self.da.update_requirement(requirement_id, status='code_generated')
             script_count = len(test_scripts.get('scripts', []))
@@ -505,9 +531,11 @@ class AutoTestFlow:
 
     def run_code_review(self, review_config: Dict[str, Any]) -> Dict[str, Any]:
         task = self.da.create_review_task(
-            review_config['repo_url'],
+            review_config.get('repo_url', ''),
             review_config.get('branch', 'main'),
             review_config.get('days', 7),
+            repo_path=review_config.get('repo_path', ''),
+            repo_type=review_config.get('repo_type', 'remote'),
         )
         run_review_task(task.id)
         refreshed = self.da.get_review_task(task.id)
@@ -515,6 +543,8 @@ class AutoTestFlow:
         return {
             'task_id': task.id,
             'repo_url': task.repo_url,
+            'repo_path': task.repo_path,
+            'repo_type': task.repo_type,
             'branch': task.branch,
             'days': task.days,
             'status': refreshed.status if refreshed else task.status,

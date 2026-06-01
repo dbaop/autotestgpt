@@ -4,21 +4,22 @@ Test case design agent.
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
-from .base_agent import BaseAgent
+from .tool_agent import ToolCapableAgent
+from .tools import format_tools_prompt
 from models import db, Requirement, TestCase, TestSuite
 from service.knowledge_service import knowledge_service
 
 logger = logging.getLogger(__name__)
 
 
-class CaseAgent(BaseAgent):
+class CaseAgent(ToolCapableAgent):
     """Generate or reuse test cases from structured requirements."""
 
     def __init__(self):
-        super().__init__(model="gpt-4", temperature=0.1)
-        self.system_prompt = """你是专业的测试用例设计师。
+        super().__init__(model="gpt-4", temperature=0.1, agent_type="case_agent")
+        self.system_prompt = self.custom_system_prompt or """你是专业的测试用例设计师。
 必须使用中文输出测试用例内容，包括 title、description、preconditions、test_steps.action、test_steps.expected、test_data.expected_output 和 tags。
 只返回合法 JSON，字段名保持英文，格式如下：
 {
@@ -77,6 +78,31 @@ class CaseAgent(BaseAgent):
 
         self.log_processing(input_data, test_cases)
         return test_cases
+
+    # ------------------------------------------------------------------
+    # act() — interactive test case design
+    # ------------------------------------------------------------------
+
+    def act(
+        self,
+        conversation_messages: List[Dict[str, str]],
+        system_instruction: str,
+    ) -> Generator[Dict[str, Any], Optional[str], None]:
+        """Interactive test case design with knowledge search and reuse."""
+        tools_prompt = format_tools_prompt(self._tools)
+        full_system = self.system_prompt + "\n\n" + tools_prompt
+
+        yield from super().act(conversation_messages, full_system)
+
+    def _try_extract_artifact(self, response: str) -> Optional[Dict[str, Any]]:
+        """Extract test cases from the agent response."""
+        try:
+            data = self.parse_test_case_response(response)
+            if "test_cases" in data:
+                return {"key": "test_cases", "data": data}
+        except Exception:
+            pass
+        return None
 
     def parse_test_case_response(self, response: str) -> Dict[str, Any]:
         import json

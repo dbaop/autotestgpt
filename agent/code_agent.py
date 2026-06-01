@@ -6,29 +6,34 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, Generator, List, Optional
 
-from .base_agent import BaseAgent
+from .tool_agent import ToolCapableAgent
+from .tools import format_tools_prompt
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 
-class CodeAgent(BaseAgent):
+class CodeAgent(ToolCapableAgent):
     """Generate executable test scripts from test cases."""
 
     def __init__(self):
-        super().__init__(model="deepseek/deepseek-chat", temperature=0.1)
-        self.api_test_prompt = (
-            "You are a senior API test automation engineer. "
-            "Return strict JSON with key `scripts` as a list of script objects."
-        )
-        self.ui_test_prompt = (
-            "You are a senior UI automation engineer with Playwright expertise. "
+        super().__init__(model="deepseek/deepseek-chat", temperature=0.1, agent_type="code_agent")
+        if self.custom_system_prompt:
+            self.api_test_prompt = self.custom_system_prompt
+            self.ui_test_prompt = self.custom_system_prompt
+        else:
+            self.api_test_prompt = (
+                "You are a senior API test automation engineer. "
+                "Return strict JSON with key `scripts` as a list of script objects."
+            )
+            self.ui_test_prompt = (
+                "You are a senior UI automation engineer with Playwright expertise. "
             "Return strict JSON with key `scripts` as a list of script objects."
         )
 
-    def build_prompt(self, test_cases: Dict[str, Any]) -> str:
+    def build_prompt(self, test_cases: Dict[str, Any], test_environment: Dict[str, Any] = None) -> str:
         test_case_list = test_cases.get("test_cases", [])
         if not test_case_list:
             return "Generate one minimal pytest script."
@@ -38,8 +43,17 @@ class CodeAgent(BaseAgent):
             "Return JSON with `scripts`.",
         ]
 
+        env = test_environment or {}
+        if env.get("test_url"):
+            prompt_parts.append(f"\nTest environment URL: {env['test_url']}")
+            prompt_parts.append("Use this URL as the base for API requests and Playwright page.goto().")
+        if env.get("login_state"):
+            prompt_parts.append(f"Login state: {env['login_state']}")
+        if env.get("credential_ref"):
+            prompt_parts.append(f"Credentials: {env['credential_ref']}")
+
         for i, tc in enumerate(test_case_list, 1):
-            prompt_parts.append(f"\\n### Test Case {i}")
+            prompt_parts.append(f"\n### Test Case {i}")
             prompt_parts.append(f"ID: {tc.get('id', f'TC-{i}')}")
             prompt_parts.append(f"Title: {tc.get('title', 'Untitled')}")
             prompt_parts.append(f"Description: {tc.get('description', '')}")
@@ -59,20 +73,21 @@ class CodeAgent(BaseAgent):
             if tc.get("test_data"):
                 prompt_parts.append(f"Test data: {tc['test_data']}")
 
-        return "\\n".join(prompt_parts)
+        return "\n".join(prompt_parts)
 
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         if not self.validate_input(input_data, ["test_cases"]):
             raise ValueError("input_data missing `test_cases`")
 
         test_cases = input_data["test_cases"]
+        test_environment = input_data.get("test_environment") or {}
         test_case_list = test_cases.get("test_cases", [])
 
         has_ui_test = any(
             str(tc.get("test_type", "")).lower() == "ui" for tc in test_case_list
         )
 
-        prompt = self.build_prompt(test_cases)
+        prompt = self.build_prompt(test_cases, test_environment)
         system_prompt = self.ui_test_prompt if has_ui_test else self.api_test_prompt
 
         response = self.call_llm(prompt, system_prompt)
@@ -97,6 +112,35 @@ class CodeAgent(BaseAgent):
         self.log_processing(input_data, result)
         return result
 
+    # ------------------------------------------------------------------
+    # act() — interactive code generation
+    # ------------------------------------------------------------------
+
+    def act(
+        self,
+        conversation_messages: List[Dict[str, str]],
+        system_instruction: str,
+    ) -> Generator[Dict[str, Any], Optional[str], None]:
+        """Interactive code generation with knowledge search and file reading."""
+        tools_prompt = format_tools_prompt(self._tools)
+        system_prompt = self.api_test_prompt + "\n\n" + tools_prompt
+        full_system = system_instruction or system_prompt
+
+        yield from super().act(conversation_messages, full_system)
+
+    def _try_extract_artifact(self, response: str) -> Optional[Dict[str, Any]]:
+        """Extract test scripts from the agent response."""
+        try:
+            data = self.parse_json_response(response)
+            scripts = data.get("scripts", [])
+            if scripts:
+                normalized = self._normalize_scripts({"scripts": scripts}, default_ui=False)
+                self.save_scripts_to_files({"scripts": normalized})
+                return {"key": "test_scripts", "data": {"scripts": normalized}}
+        except Exception:
+            pass
+        return None
+
     def _normalize_scripts(self, payload: Dict[str, Any], default_ui: bool) -> List[Dict[str, Any]]:
         scripts = payload.get("scripts", [])
         if not isinstance(scripts, list):
@@ -111,6 +155,9 @@ class CodeAgent(BaseAgent):
             language = script.get("language") or "python"
             framework = script.get("framework") or ("playwright" if default_ui else "pytest")
             code = script.get("code") or self._default_code(default_ui, script_id)
+            if isinstance(code, list):
+                code = "\n".join(str(line) for line in code)
+            code = self._fix_code_newlines(str(code))
 
             normalized.append(
                 {
@@ -143,18 +190,27 @@ class CodeAgent(BaseAgent):
 
         return normalized
 
+    @staticmethod
+    def _fix_code_newlines(code: str) -> str:
+        """Fix LLM-generated code that has literal \\n instead of real newlines."""
+        if not code or "\n" in code:
+            return code
+        if "\\n" in code:
+            return code.replace("\\n", "\n")
+        return code
+
     def _default_code(self, default_ui: bool, script_id: str) -> str:
         safe_name = script_id.replace("-", "_")
         if default_ui:
             return (
-                "from playwright.sync_api import Page\\n\\n"
-                f"def test_{safe_name}(page: Page):\\n"
-                "    page.goto('about:blank')\\n"
-                "    assert page.url is not None\\n"
+                "from playwright.sync_api import Page\n\n"
+                f"def test_{safe_name}(page: Page):\n"
+                "    page.goto('about:blank')\n"
+                "    assert page.url is not None\n"
             )
         return (
-            f"def test_{safe_name}():\\n"
-            "    assert True\\n"
+            f"def test_{safe_name}():\n"
+            "    assert True\n"
         )
 
     def save_scripts_to_files(self, scripts_data: Dict[str, Any], base_dir: str = None):
@@ -173,8 +229,11 @@ class CodeAgent(BaseAgent):
                 filename = f"test_{script_id}{ext}"
                 filepath = os.path.join(base_dir, filename)
 
+                code_content = script.get("code", "")
+                if isinstance(code_content, list):
+                    code_content = "\n".join(str(line) for line in code_content)
                 with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(script.get("code", ""))
+                    f.write(str(code_content))
 
                 script["file_path"] = filepath
                 script["filename"] = filename

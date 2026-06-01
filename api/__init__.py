@@ -4,7 +4,7 @@ API module
 
 from flask import Blueprint
 
-from .routes import requirements, test_cases, executions, projects, conversations, code_reviews, knowledge_bases, reports, autofix, flow, agent_workbench
+from .routes import requirements, test_cases, executions, projects, conversations, code_reviews, knowledge_bases, reports, autofix, flow, agent_workbench, agent_config
 
 api_blueprint = Blueprint('api', __name__)
 
@@ -37,6 +37,7 @@ api_blueprint.add_url_rule('/conversations/<int:conv_id>', view_func=conversatio
 api_blueprint.add_url_rule('/conversations/<int:conv_id>/messages', view_func=conversations.get_messages, methods=['GET'])
 api_blueprint.add_url_rule('/conversations/<int:conv_id>/messages', view_func=conversations.send_message, methods=['POST'])
 api_blueprint.add_url_rule('/conversations/<int:conv_id>/agent-context', view_func=conversations.get_agent_context, methods=['GET'])
+api_blueprint.add_url_rule('/conversations/<int:conv_id>/stream', view_func=conversations.stream_conversation, methods=['GET'])
 
 # Code reviews (Phase 1)
 api_blueprint.add_url_rule('/code-reviews', view_func=code_reviews.list_review_tasks, methods=['GET'])
@@ -68,3 +69,12 @@ api_blueprint.add_url_rule('/flow/start', view_func=flow.start_test_flow, method
 api_blueprint.add_url_rule('/flow/status/<int:req_id>', view_func=flow.get_test_flow_status, methods=['GET'])
 api_blueprint.add_url_rule('/flow/resume/<int:req_id>', view_func=flow.resume_test_flow, methods=['POST'])
 api_blueprint.add_url_rule('/flow/retry-script/<int:script_id>', view_func=flow.retry_test_script, methods=['POST'])
+
+# Agent config
+api_blueprint.add_url_rule('/agent-configs', view_func=agent_config.list_agent_configs, methods=['GET'])
+api_blueprint.add_url_rule('/agent-configs', view_func=agent_config.upsert_agent_config, methods=['POST'])
+api_blueprint.add_url_rule('/agent-configs/<int:config_id>', view_func=agent_config.update_agent_config, methods=['PUT'])
+
+# Environment config
+api_blueprint.add_url_rule('/environment/<int:requirement_id>', view_func=agent_config.get_environment_config, methods=['GET'])
+api_blueprint.add_url_rule('/environment', view_func=agent_config.save_environment_config, methods=['POST'])

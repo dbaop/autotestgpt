@@ -16,14 +16,27 @@ def create_review_task():
     try:
         body = request.get_json() or {}
         repo_url = (body.get("repo_url") or "").strip()
+        repo_path = (body.get("repo_path") or "").strip()
         branch = (body.get("branch") or "main").strip()
         days = int(body.get("days") or 7)
-        if not repo_url:
-            raise ValidationError("repo_url is required")
+
+        if repo_path:
+            repo_type = "local"
+        elif repo_url:
+            repo_type = "remote"
+        else:
+            raise ValidationError("repo_url or repo_path is required")
         if days <= 0:
             raise ValidationError("days must be > 0")
 
-        task = CodeReviewTask(repo_url=repo_url, branch=branch, days=days, status="pending")
+        task = CodeReviewTask(
+            repo_url=repo_url or None,
+            repo_path=repo_path or None,
+            repo_type=repo_type,
+            branch=branch,
+            days=days,
+            status="pending",
+        )
         db.session.add(task)
         db.session.commit()
 

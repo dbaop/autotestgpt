@@ -32,6 +32,35 @@ const WORKFLOW_STEPS = [
   { key: 'code_generated', name: '执行测试', agent: 'ExecAgent', color: 'var(--accent-violet)' },
 ]
 
+function ExpandableError({ error }: { error: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const maxPreview = 200
+  const needsExpand = error.length > maxPreview
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{
+        padding: '12px 16px', borderRadius: 12,
+        background: 'rgba(255,45,120,0.06)', fontFamily: C.mono, fontSize: 11,
+        color: 'var(--accent-magenta)', lineHeight: 1.6,
+        maxHeight: expanded ? 'none' : 200, overflowY: expanded ? 'visible' : 'auto',
+        whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+      }}>
+        {expanded ? error : error.substring(0, maxPreview) + (needsExpand ? '...' : '')}
+      </div>
+      {needsExpand && (
+        <button type="button" onClick={() => setExpanded(e => !e)} style={{
+          marginTop: 6, fontFamily: C.mono, fontSize: 10, fontWeight: 600,
+          color: 'var(--accent-magenta)', background: 'none', border: 'none',
+          cursor: 'pointer', textDecoration: 'underline',
+        }}>
+          {expanded ? '收起' : `展开完整错误 (${error.length} 字符)`}
+        </button>
+      )}
+    </div>
+  )
+}
+
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
     <div style={{
@@ -462,13 +491,7 @@ export default function RequirementDetail() {
                             case #{detail.case_id} · {detail.execution_time ? `${Number(detail.execution_time).toFixed(2)}s` : '--'}
                           </div>
                           {detail.error && (
-                            <div style={{
-                              marginTop: 10, padding: '12px 16px', borderRadius: 12,
-                              background: 'rgba(255,45,120,0.06)', fontFamily: C.mono, fontSize: 11, color: 'var(--accent-magenta)',
-                              maxHeight: 80, overflowY: 'auto', lineHeight: 1.6,
-                            }}>
-                              {String(detail.error).substring(0, 300)}
-                            </div>
+                            <ExpandableError error={String(detail.error)} />
                           )}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>

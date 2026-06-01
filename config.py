@@ -1,8 +1,13 @@
 ﻿from dotenv import load_dotenv
 import os
+from pathlib import Path
 from urllib.parse import quote_plus
 
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env")
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_instance_path = os.path.join(BASE_DIR, "instance")
+os.makedirs(_instance_path, exist_ok=True)
 
 
 class Config:
@@ -12,6 +17,9 @@ class Config:
     SERVER_PORT = int(os.getenv("SERVER_PORT", 8000))
     WORKSPACE = "./workspace"
     REPORT_DIR = "./report"
+
+    # Feature flag: enable conversation-driven test flow (instead of rigid pipeline)
+    CONVERSATION_FLOW_ENABLED = os.getenv("CONVERSATION_FLOW_ENABLED", "false").lower() == "true"
 
     DB_HOST = os.getenv("DB_HOST", "")
     DB_PORT = int(os.getenv("DB_PORT", 3306))
@@ -29,4 +37,4 @@ class Config:
             f"{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
         )
     else:
-        DATABASE_URI = "sqlite:///autotestgpt.db"
+        DATABASE_URI = f"sqlite:///{os.path.join(_instance_path, 'autotestgpt.db')}"

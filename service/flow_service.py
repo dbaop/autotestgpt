@@ -106,6 +106,31 @@ def start_flow(data: dict):
     db.session.add(conversation)
     db.session.commit()
 
+    # Orchestrator mode: kick off the conversation-driven flow
+    from config import Config
+    if Config.CONVERSATION_FLOW_ENABLED:
+        import json as _json
+        from service.sse_service import push_sse_event, broadcast_error
+
+        def _run_orchestrator_flow():
+            from agent.orchestrator import process_user_message_flow
+            try:
+                for event in process_user_message_flow(conversation.id, demand):
+                    push_sse_event(conversation.id, event)
+            except Exception as exc:
+                broadcast_error(conversation.id, str(exc))
+
+        _executor.submit(_run_orchestrator_flow)
+
+        return {
+            "message": "Test flow started (orchestrator mode)",
+            "requirement_id": requirement.id,
+            "conversation_id": conversation.id,
+            "status": "processing",
+            "orchestrator_mode": True,
+        }
+
+    # Legacy pipeline mode
     flow = AutoTestFlow()
     flow_data = {"demand": demand, "requirement_id": requirement.id, "project_id": project_id}
     if test_environment:

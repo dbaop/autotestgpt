@@ -164,6 +164,20 @@ a { color: inherit; }
   50% { opacity: 0.45; }
 }
 
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.cursor-blink {
+  animation: cursor-blink 1s step-end infinite;
+}
+
 .animate-float-up {
   animation: float-up 0.42s cubic-bezier(0.16, 1, 0.3, 1) both;
 }

@@ -58,7 +58,9 @@ export interface TestScript {
 
 export interface CodeReviewTask {
   id: number
-  repo_url: string
+  repo_url?: string | null
+  repo_path?: string | null
+  repo_type: 'local' | 'remote'
   branch: string
   days: number
   status: string
@@ -77,6 +79,9 @@ export interface CodeReviewFinding {
   commit_sha?: string
   file_path?: string
   severity: string
+  category?: string
+  review_type?: string
+  suggestion?: string
   title: string
   detail?: string
   created_at: string
@@ -163,6 +168,32 @@ export interface Message {
   created_at: string
 }
 
+// SSE event types for conversation streaming
+export type SSEEventType =
+  | 'connected' | 'heartbeat'
+  | 'message' | 'tool_call' | 'tool_result'
+  | 'question' | 'artifact' | 'phase_change'
+  | 'error' | 'done'
+
+export interface SSEEvent {
+  type: SSEEventType
+  content?: string; chunk?: boolean; complete?: boolean
+  name?: string; arguments?: Record<string, any>; result?: any
+  question?: string; context?: string
+  key?: string; data?: any
+  from?: string; to?: string; agent?: string
+  message?: string
+  conversation_id?: number
+}
+
+export interface SendMessageResponse {
+  message: string
+  messages?: Message[]
+  last_id?: number
+  agent_context?: ChatAgentContext | null
+  orchestrator_mode?: boolean
+}
+
 export interface HealthStatus {
   status: string
   database: string
@@ -189,7 +220,8 @@ export interface FlowStartPayload {
   project_id?: number
   knowledge_base_id?: number | null
   review?: {
-    repo_url: string
+    repo_url?: string
+    repo_path?: string
     branch?: string
     days?: number
   }
@@ -301,7 +333,7 @@ export const knowledgeBasesApi = {
 export const codeReviewsApi = {
   list: () => api.get<PaginatedResponse<CodeReviewTask>>('/code-reviews'),
   get: (id: number) => api.get<CodeReviewTask>(`/code-reviews/${id}`),
-  create: (data: { repo_url: string; branch: string; days: number }) =>
+  create: (data: { repo_url?: string; repo_path?: string; branch: string; days: number }) =>
     api.post<{ task: CodeReviewTask; run_result: any }>('/code-reviews', data),
 }
 
@@ -338,6 +370,8 @@ export interface AgentWorkbenchItem {
   }
   review: {
     repo_url?: string | null
+    repo_path?: string | null
+    repo_type?: string | null
     branch?: string | null
     days?: number | null
     status?: string | null
@@ -388,10 +422,51 @@ export const conversationsApi = {
       params: lastId ? { last_id: lastId } : undefined,
     }),
   sendMessage: (id: number, content: string) =>
-    api.post<{ message: string; messages: Message[]; last_id: number; agent_context?: ChatAgentContext | null }>(
+    api.post<SendMessageResponse>(
       `/conversations/${id}/messages`,
       { content },
     ),
+  /** Connect to the SSE stream for real-time agent events. */
+  streamUrl: (id: number) => `/api/conversations/${id}/stream`,
+}
+
+export interface AgentConfig {
+  id: number
+  agent_type: string
+  project_id?: number | null
+  system_prompt?: string
+  model_name?: string
+  temperature: number
+  max_tokens: number
+  is_enabled: boolean
+  extra_config: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface EnvironmentConfig {
+  test_url?: string | null
+  login_state?: string
+  credential_ref?: string | null
+  allow_explore?: boolean
+  last_probe_at?: string | null
+  probe_status?: string | null
+}
+
+export const agentConfigsApi = {
+  list: (projectId?: number) =>
+    api.get<{ items: AgentConfig[]; total: number }>('/agent-configs', { params: projectId ? { project_id: projectId } : undefined }),
+  upsert: (data: Partial<AgentConfig> & { agent_type: string }) =>
+    api.post<{ message: string; config: AgentConfig }>('/agent-configs', data),
+  update: (id: number, data: Partial<AgentConfig>) =>
+    api.put<{ message: string; config: AgentConfig }>(`/agent-configs/${id}`, data),
+}
+
+export const environmentApi = {
+  get: (requirementId: number) =>
+    api.get<{ requirement_id: number; environment: EnvironmentConfig }>(`/environment/${requirementId}`),
+  save: (data: { requirement_id: number; test_url?: string; login_state?: string; credential_ref?: string; allow_explore?: boolean }) =>
+    api.post<{ message: string; environment: EnvironmentConfig }>('/environment', data),
 }
 
 export default api

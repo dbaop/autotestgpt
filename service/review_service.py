@@ -1,11 +1,12 @@
 """
-Code review task service.
+Code review task service — git diff 收集 + 双 Agent LLM 并行智能分析。
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
@@ -39,7 +40,27 @@ def _repo_name_from_url(repo_url: str) -> str:
     return repo_name or "repo"
 
 
-def _ensure_local_repo(repo_url: str) -> str:
+def _is_git_repo(path: str) -> bool:
+    git_dir = Path(path) / ".git"
+    return git_dir.exists()
+
+
+def _resolve_repo_path(task: CodeReviewTask) -> str:
+    if task.repo_type == "local":
+        local_path = task.repo_path or ""
+        if not local_path.strip():
+            raise RuntimeError("repo_path is required for local review")
+        resolved = str(Path(local_path.strip()).resolve())
+        if not os.path.isdir(resolved):
+            raise RuntimeError(f"Local path does not exist: {resolved}")
+        if not _is_git_repo(resolved):
+            raise RuntimeError(f"Path is not a git repository: {resolved}")
+        return resolved
+
+    repo_url = (task.repo_url or "").strip()
+    if not repo_url:
+        raise RuntimeError("repo_url is required for remote review")
+
     repo_name = _repo_name_from_url(repo_url)
     repos_root = Path(Config.WORKSPACE) / "repos"
     repos_root.mkdir(parents=True, exist_ok=True)
@@ -53,6 +74,96 @@ def _ensure_local_repo(repo_url: str) -> str:
     return str(repo_path)
 
 
+# ---------------------------------------------------------------------------
+# 双 Agent 配置
+# ---------------------------------------------------------------------------
+
+def _build_review_agents():
+    """构建安全审查 Agent（MiniMax）和质量审查 Agent（DeepSeek）。"""
+    from agent.review_agent import ReviewAgent
+
+    agents = []
+    has_minimax = bool(getattr(Config, "MINIMAX_API_KEY", None))
+    has_deepseek = bool(getattr(Config, "DEEPSEEK_API_KEY", None))
+
+    # 按思路：MiniMax 做安全/逻辑审查，DeepSeek 做质量/性能审查
+    if has_minimax and has_deepseek:
+        agents.append(ReviewAgent(
+            review_type="security_logic",
+            force_model="minimax/abab6.5s-chat",
+            api_key=Config.MINIMAX_API_KEY,
+            api_base="https://api.minimax.chat/v1",
+        ))
+        agents.append(ReviewAgent(
+            review_type="quality_perf",
+            force_model="deepseek/deepseek-chat",
+            api_key=Config.DEEPSEEK_API_KEY,
+        ))
+    elif has_deepseek:
+        agents.append(ReviewAgent(
+            review_type="security_logic",
+            force_model="deepseek/deepseek-chat",
+            api_key=Config.DEEPSEEK_API_KEY,
+        ))
+        agents.append(ReviewAgent(
+            review_type="quality_perf",
+            force_model="deepseek/deepseek-chat",
+            api_key=Config.DEEPSEEK_API_KEY,
+        ))
+    elif has_minimax:
+        agents.append(ReviewAgent(
+            review_type="security_logic",
+            force_model="minimax/abab6.5s-chat",
+            api_key=Config.MINIMAX_API_KEY,
+            api_base="https://api.minimax.chat/v1",
+        ))
+        agents.append(ReviewAgent(
+            review_type="quality_perf",
+            force_model="minimax/abab6.5s-chat",
+            api_key=Config.MINIMAX_API_KEY,
+            api_base="https://api.minimax.chat/v1",
+        ))
+    else:
+        # 没有任何 LLM key，创建一个 fallback agent（走默认自动解析）
+        agents.append(ReviewAgent(review_type="security_logic"))
+        agents.append(ReviewAgent(review_type="quality_perf"))
+    return agents
+
+
+def _analyze_commit_with_agents(agents, commit_sha: str, commit_msg: str,
+                                diff_text: str) -> List[dict]:
+    """用双 Agent 并行分析单个 commit 的 diff。"""
+    from agent.review_agent import merge_review_results
+
+    input_data = {
+        "commit_sha": commit_sha,
+        "commit_msg": commit_msg,
+        "diff_text": diff_text,
+    }
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(agents)) as pool:
+        future_map = {
+            pool.submit(agent.process, input_data): agent.review_type
+            for agent in agents
+        }
+        for future in as_completed(future_map):
+            review_type = future_map[future]
+            try:
+                results[review_type] = future.result()
+            except Exception as exc:
+                results[review_type] = {"findings": [], "summary": "", "error": str(exc)}
+
+    return merge_review_results(
+        results.get("security_logic", {}),
+        results.get("quality_perf", {}),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 主逻辑
+# ---------------------------------------------------------------------------
+
 def run_review_task(task_id: int):
     task = db.session.get(CodeReviewTask, task_id)
     if not task:
@@ -63,7 +174,7 @@ def run_review_task(task_id: int):
     db.session.commit()
 
     try:
-        repo_path = _ensure_local_repo(task.repo_url)
+        repo_path = _resolve_repo_path(task)
         log_output = _run_git(
             [
                 "git",
@@ -77,6 +188,9 @@ def run_review_task(task_id: int):
         )
         commit_lines = [line for line in log_output.splitlines() if line.strip()]
 
+        # 构建双 Agent
+        agents = _build_review_agents()
+
         findings_count = 0
         for line in commit_lines:
             parts = line.split("|", 3)
@@ -89,22 +203,43 @@ def run_review_task(task_id: int):
                 cwd=repo_path,
             )
 
-            finding = CodeReviewFinding(
-                task_id=task.id,
-                commit_sha=commit_sha,
-                file_path=None,
-                severity="info",
-                title=subject[:200],
-                detail=f"author={author}; date={commit_date}\n\n{diff_text[:4000]}",
+            # LLM 双 Agent 并行分析
+            llm_findings = _analyze_commit_with_agents(
+                agents, commit_sha, subject, diff_text
             )
-            db.session.add(finding)
-            findings_count += 1
+
+            if llm_findings:
+                for f in llm_findings:
+                    finding = CodeReviewFinding(
+                        task_id=task.id,
+                        commit_sha=commit_sha,
+                        file_path=f.get("file_path"),
+                        severity=f.get("severity", "info"),
+                        category=f.get("category"),
+                        review_type=f.get("review_type"),
+                        suggestion=f.get("suggestion"),
+                        title=f.get("title", subject[:200]),
+                        detail=f.get("description", ""),
+                    )
+                    db.session.add(finding)
+                    findings_count += 1
+            else:
+                # LLM 没有发现问题，存一条空的 info 记录
+                finding = CodeReviewFinding(
+                    task_id=task.id,
+                    commit_sha=commit_sha,
+                    severity="info",
+                    title=subject[:200],
+                    detail=f"author={author}; date={commit_date}",
+                )
+                db.session.add(finding)
+                findings_count += 1
 
         task.status = "completed"
         task.finished_at = datetime.now(timezone.utc)
         task.summary = (
-            f"Reviewed {len(commit_lines)} commits in last {task.days} days; "
-            f"generated {findings_count} findings"
+            f"LLM审查 {len(commit_lines)} commits ({task.days}d); "
+            f"生成 {findings_count} 条 findings"
         )
         db.session.commit()
 

@@ -125,6 +125,8 @@ def test_review_service_collects_commits_and_writes_task(monkeypatch):
         def __init__(self):
             self.id = 11
             self.repo_url = "http://git.100credit.cn/group/repo.git"
+            self.repo_path = None
+            self.repo_type = "remote"
             self.branch = "main"
             self.days = 3
             self.status = "pending"
@@ -150,6 +152,13 @@ def test_review_service_collects_commits_and_writes_task(monkeypatch):
             return None
 
     monkeypatch.setattr("service.review_service.db.session", DummySession())
+    monkeypatch.setattr("service.review_service._resolve_repo_path", lambda t: "/fake/repo")
+
+    # Mock LLM agents — return no findings to keep test simple
+    monkeypatch.setattr(
+        "service.review_service._analyze_commit_with_agents",
+        lambda agents, sha, msg, diff: [],
+    )
 
     def _fake_git(cmd, cwd=None):
         if "log" in cmd:

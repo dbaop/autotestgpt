@@ -58,6 +58,8 @@ def test_review_service_uses_repo_url_workspace(monkeypatch):
         def __init__(self):
             self.id = 21
             self.repo_url = "http://git.100credit.cn/group/demo-repo.git"
+            self.repo_path = None
+            self.repo_type = "remote"
             self.branch = "main"
             self.days = 5
             self.status = "pending"
@@ -84,7 +86,7 @@ def test_review_service_uses_repo_url_workspace(monkeypatch):
             return None
 
     monkeypatch.setattr("service.review_service.db.session", DummySession())
-    monkeypatch.setattr("service.review_service._ensure_local_repo", lambda repo_url: "workspace/repos/demo-repo")
+    monkeypatch.setattr("service.review_service._resolve_repo_path", lambda t: "workspace/repos/demo-repo")
 
     def _fake_git(cmd, cwd=None):
         seen_cwds.append(cwd)

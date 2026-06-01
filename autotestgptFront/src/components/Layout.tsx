@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { path: '/reviews', label: '代码 Review', icon: '<>', accent: 'violet' },
   { path: '/knowledge-bases', label: '知识库', icon: 'KB', accent: 'magenta' },
   { path: '/chat', label: '对话协作', icon: 'AI', accent: 'cyan' },
+  { path: '/settings', label: 'Agent 配置', icon: '⚙', accent: 'amber' },
 ]
 
 function StatusIndicator({ status }: { status: string }) {

@@ -4,18 +4,31 @@
 
 import json
 import logging
-from typing import Dict, Any
-from .base_agent import BaseAgent
+from typing import Any, Dict, Generator, List, Optional
+
+from .tool_agent import ToolCapableAgent
+from .tools import format_tools_prompt
 from config import Config
 
 logger = logging.getLogger(__name__)
 
-class ReqAgent(BaseAgent):
-    """需求解析智能体"""
-    
+CONVERSATION_PHASES = {
+    "idle": "No active task",
+    "clarifying": "Agent is asking the user questions",
+    "parsing": "ReqAgent is parsing requirements",
+    "designing_cases": "CaseAgent is designing test cases",
+    "generating_code": "CodeAgent is generating test scripts",
+    "executing": "ExecAgent is running tests",
+    "reviewing": "ReviewAgent is reviewing code",
+    "completed": "All phases complete",
+}
+
+class ReqAgent(ToolCapableAgent):
+    """需求解析智能体 — 支持工具调用和多轮交互"""
+
     def __init__(self):
-        super().__init__(model="gpt-4", temperature=0.1)
-        self.system_prompt = """你是一个专业的测试需求分析师。你的任务是将自然语言需求解析为结构化的测试需求。
+        super().__init__(model="gpt-4", temperature=0.1, agent_type="req_agent")
+        self.system_prompt = self.custom_system_prompt or """你是一个专业的测试需求分析师。你的任务是将自然语言需求解析为结构化的测试需求。
 
 请按照以下JSON格式输出：
 
@@ -72,6 +85,13 @@ class ReqAgent(BaseAgent):
   ]
 }
 
+**重要规则：**
+1. 如果用户提到了平台/应用名称但没有提供测试地址（URL），你**必须**先使用 ask_user 工具询问测试地址，不要猜测。
+2. 如果测试涉及登录/认证，你**必须**使用 ask_user 询问登录方式（账号密码/手机验证码/SSO）和测试凭据。
+3. 如果用户需求描述模糊（如只说"回归测试"没说具体功能），你**必须**使用 ask_user 要求用户补充。
+4. 先用 search_knowledge_base 查找相关文档，找不到再用 ask_user。
+5. 只有收集到足够信息后才输出 JSON。
+
 请确保输出是有效的JSON格式，不要包含其他解释性文本。"""
     
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -121,7 +141,33 @@ class ReqAgent(BaseAgent):
         except Exception as e:
             logger.error(f"需求解析失败: {e}")
             raise
-    
+
+    # ------------------------------------------------------------------
+    # act() — 多轮交互式需求解析
+    # ------------------------------------------------------------------
+
+    def act(
+        self,
+        conversation_messages: List[Dict[str, str]],
+        system_instruction: str,
+    ) -> Generator[Dict[str, Any], Optional[str], None]:
+        """Interactive requirement parsing with knowledge base search and user questions."""
+        tools_prompt = format_tools_prompt(self._tools)
+        full_system = self.system_prompt + "\n\n" + tools_prompt
+
+        yield from super().act(conversation_messages, full_system)
+
+    def _try_extract_artifact(self, response: str) -> Optional[Dict[str, Any]]:
+        """Extract structured requirement from the agent response."""
+        try:
+            data = self.parse_json_response(response)
+            if "title" in data and ("test_points" in data or "test_scenarios" in data
+                                     or "business_modules" in data):
+                return {"key": "structured_requirement", "data": data}
+        except Exception:
+            pass
+        return None
+
     def get_timestamp(self):
         """获取时间戳"""
         from datetime import datetime
