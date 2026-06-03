@@ -38,6 +38,7 @@ api_blueprint.add_url_rule('/conversations/<int:conv_id>/messages', view_func=co
 api_blueprint.add_url_rule('/conversations/<int:conv_id>/messages', view_func=conversations.send_message, methods=['POST'])
 api_blueprint.add_url_rule('/conversations/<int:conv_id>/agent-context', view_func=conversations.get_agent_context, methods=['GET'])
 api_blueprint.add_url_rule('/conversations/<int:conv_id>/stream', view_func=conversations.stream_conversation, methods=['GET'])
+api_blueprint.add_url_rule('/conversations/<int:conv_id>/read', view_func=conversations.mark_conversation_read, methods=['POST'])
 
 # Code reviews (Phase 1)
 api_blueprint.add_url_rule('/code-reviews', view_func=code_reviews.list_review_tasks, methods=['GET'])

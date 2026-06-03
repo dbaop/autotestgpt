@@ -135,7 +135,12 @@ export default function NewTest() {
           : { repo_url: reviewRepoUrl.trim(), branch: reviewBranch.trim(), days: reviewDays }
       ) : undefined,
     })
-    navigate(`/requirements/${res.data.requirement_id}`)
+    // 跳转到对话协作，让用户立刻看到与该需求绑定的自动创建的对话（含未读消息）
+    if (res.data.conversation_id) {
+      navigate('/chat', { state: { conversationId: res.data.conversation_id } })
+    } else {
+      navigate(`/requirements/${res.data.requirement_id}`)
+    }
   }
 
   const handleRequirementFileImport = async () => {
@@ -145,7 +150,11 @@ export default function NewTest() {
     if (selectedKnowledgeBaseId) formData.append('knowledge_base_id', String(selectedKnowledgeBaseId))
     formData.append('file', uploadFile)
     const res = await requirementsApi.importFile(formData)
-    navigate(`/requirements/${res.data.requirement.id}`)
+    if (res.data.conversation_id) {
+      navigate('/chat', { state: { conversationId: res.data.conversation_id } })
+    } else {
+      navigate(`/requirements/${res.data.requirement.id}`)
+    }
   }
 
   const handleKnowledgeFileImport = async () => {

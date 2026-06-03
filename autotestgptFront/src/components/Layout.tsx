@@ -30,11 +30,21 @@ export default function Layout() {
   const [status, setStatus] = useState<string>('checking')
   const [mobileOpen, setMobileOpen] = useState(false)
   const [theme, setTheme] = useState<'dark' | 'light'>('dark')
+  const [chatUnread, setChatUnread] = useState(0)
 
   useEffect(() => {
     healthApi.check()
       .then(res => setStatus(res.data.status === 'ok' ? 'healthy' : 'error'))
       .catch(() => setStatus('error'))
+  }, [])
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { total?: number } | undefined
+      if (detail && typeof detail.total === 'number') setChatUnread(detail.total)
+    }
+    window.addEventListener('autotestgpt:chat-unread', handler)
+    return () => window.removeEventListener('autotestgpt:chat-unread', handler)
   }, [])
 
   useEffect(() => {
@@ -82,6 +92,7 @@ export default function Layout() {
           {NAV_ITEMS.map((item, idx) => {
             const active = loc.pathname === item.path ||
               (item.path !== '/' && loc.pathname.startsWith(item.path))
+            const showUnread = item.path === '/chat' && chatUnread > 0
 
             return (
               <Link
@@ -93,6 +104,20 @@ export default function Layout() {
               >
                 <span className="nav-icon" aria-hidden="true">{item.icon}</span>
                 <span className="nav-text">{item.label}</span>
+                {showUnread && (
+                  <span
+                    aria-label={`${chatUnread} 条未读`}
+                    style={{
+                      marginLeft: 'auto', minWidth: 20, height: 20, padding: '0 6px',
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 800, color: '#050810',
+                      background: 'linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald))',
+                      borderRadius: 10, boxShadow: '0 0 8px rgba(0,212,255,0.4)',
+                    }}
+                  >
+                    {chatUnread > 99 ? '99+' : chatUnread}
+                  </span>
+                )}
                 {active && <span className="nav-current" aria-hidden="true" />}
               </Link>
             )

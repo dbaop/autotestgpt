@@ -245,10 +245,24 @@ class Conversation(db.Model):
     title = db.Column(db.String(200), nullable=False)
     requirement_id = db.Column(db.Integer, db.ForeignKey('requirements.id'), nullable=True)
     status = db.Column(db.String(50), default='active')
+    last_read_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     messages = db.relationship('Message', backref='conversation', lazy=True, cascade='all, delete-orphan', order_by='Message.created_at')
+
+    def unread_count(self) -> int:
+        """Count non-user messages newer than last_read_at (treat NULL as 'never read')."""
+        if not self.messages:
+            return 0
+        last_read = self.last_read_at
+        count = 0
+        for msg in self.messages:
+            if msg.sender == 'user':
+                continue
+            if last_read is None or (msg.created_at and msg.created_at > last_read):
+                count += 1
+        return count
 
     def to_dict(self):
         return {
@@ -256,9 +270,11 @@ class Conversation(db.Model):
             'title': self.title,
             'requirement_id': self.requirement_id,
             'status': self.status,
+            'last_read_at': self.last_read_at.isoformat() if self.last_read_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'message_count': len(self.messages),
+            'unread_count': self.unread_count(),
         }
 
 

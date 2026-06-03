@@ -112,3 +112,42 @@ def test_send_message_emits_waiting_user_and_returns_agent_context():
 
         events = AgentEvent.query.filter_by(requirement_id=requirement_id, event_type="waiting_user").all()
         assert len(events) >= 1
+
+
+def test_unlinked_chat_message_creates_requirement_and_starts_flow():
+    app, db = _build_test_app(_local_tmp_dir())
+    with app.app_context():
+        from models import Conversation
+
+        conv = Conversation(title="临时对话")
+        db.session.add(conv)
+        db.session.commit()
+        conv_id = conv.id
+
+    demand = "请测试会员中心登录，自动补齐测试环境后开始执行。"
+
+    from unittest.mock import patch
+
+    with patch("agent.chat_agent.process_user_message", return_value={"success": True}), \
+            patch("service.flow_service.enqueue_requirement_flow", return_value={"flow_id": "flow-1", "status": "processing"}, create=True) as enqueue:
+        response = app.test_client().post(
+            f"/api/conversations/{conv_id}/messages",
+            json={"content": demand},
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["started_from_chat"] is True
+    assert payload["requirement_id"]
+    assert payload["agent_context"]["requirement_id"] == payload["requirement_id"]
+    enqueue.assert_called_once()
+
+    with app.app_context():
+        from models import Conversation, Requirement
+
+        updated_conv = db.session.get(Conversation, conv_id)
+        requirement = db.session.get(Requirement, updated_conv.requirement_id)
+        assert requirement is not None
+        assert requirement.raw_text == demand
+        assert requirement.status == "pending"
+        assert updated_conv.title.startswith(f"需求 #{requirement.id}")

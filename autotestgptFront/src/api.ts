@@ -153,7 +153,9 @@ export interface Conversation {
   status: 'active' | 'closed'
   created_at: string
   updated_at: string
+  last_read_at?: string | null
   message_count: number
+  unread_count: number
   messages?: Message[]
   agent_context?: ChatAgentContext | null
 }
@@ -192,6 +194,14 @@ export interface SendMessageResponse {
   last_id?: number
   agent_context?: ChatAgentContext | null
   orchestrator_mode?: boolean
+  started_from_chat?: boolean
+  requirement_id?: number
+  flow?: {
+    message?: string
+    status?: string
+    flow_id?: string
+    requirement_id?: number
+  } | null
 }
 
 export interface HealthStatus {
@@ -203,8 +213,10 @@ export interface HealthStatus {
 export interface FlowStartResponse {
   message: string
   requirement_id: number
+  conversation_id?: number
   status: string
-  flow_id: string
+  flow_id?: string
+  orchestrator_mode?: boolean
 }
 
 export interface FlowResumeResponse {
@@ -277,9 +289,9 @@ export const requirementsApi = {
   list: () => api.get<PaginatedResponse<Requirement>>('/requirements'),
   get: (id: number) => api.get<RequirementDetail>(`/requirements/${id}`),
   create: (data: { title: string; description: string; raw_text: string; knowledge_base_id?: number | null }) =>
-    api.post<{ message: string; requirement: Requirement }>('/requirements', data),
+    api.post<{ message: string; requirement: Requirement; conversation_id: number }>('/requirements', data),
   importFile: (formData: FormData) =>
-    api.post<{ message: string; requirement: Requirement }>('/requirements/import', formData, {
+    api.post<{ message: string; requirement: Requirement; conversation_id: number }>('/requirements/import', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
   update: (id: number, data: Partial<Requirement>) =>
@@ -426,6 +438,8 @@ export const conversationsApi = {
       `/conversations/${id}/messages`,
       { content },
     ),
+  markRead: (id: number) =>
+    api.post<{ message: string; conversation_id: number; unread_count: number }>(`/conversations/${id}/read`),
   /** Connect to the SSE stream for real-time agent events. */
   streamUrl: (id: number) => `/api/conversations/${id}/stream`,
 }

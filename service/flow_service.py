@@ -152,6 +152,36 @@ def start_flow(data: dict):
     }
 
 
+def enqueue_requirement_flow(requirement: Requirement, review_config: dict | None = None) -> dict[str, Any]:
+    """Queue the legacy flow for an existing requirement."""
+    flow = AutoTestFlow()
+    flow_data = {
+        "demand": requirement.raw_text,
+        "requirement_id": requirement.id,
+        "project_id": requirement.project_id or 1,
+    }
+
+    progress = requirement.execution_progress or {}
+    structured = requirement.structured_data or {}
+    test_environment = progress.get("test_environment") or structured.get("test_environment")
+    if test_environment:
+        flow_data["test_environment"] = test_environment
+    if review_config:
+        flow_data["review"] = review_config
+
+    flow_id = str(id(flow))
+    with _registry_lock:
+        _flow_registry[requirement.id] = {"flow_id": flow_id, "status": "pending"}
+    _executor.submit(execute_flow_async, flow, flow_data, requirement.id)
+
+    return {
+        "message": "Test flow started",
+        "requirement_id": requirement.id,
+        "status": "processing",
+        "flow_id": flow_id,
+    }
+
+
 def get_flow_status(requirement_id: int):
     requirement = db.session.get(Requirement, requirement_id)
     if not requirement:

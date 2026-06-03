@@ -82,3 +82,33 @@ def test_frontend_chat_phase5_summary_panel():
     assert "Agent 工作台" in chat_source
     assert "/workbench/" in detail_source
     assert "对话协作" in detail_source
+
+
+def test_frontend_chat_bootstrap_copy_and_workbench_resume_contract():
+    chat_source = _read_source("pages/Chat.tsx")
+    workbench_source = _read_source("pages/AgentWorkbench.tsx")
+
+    assert "输入需求后，Agent 会自动补齐信息并启动测试" in chat_source
+    assert "flowApi.resume" in workbench_source
+    assert "保存并继续测试" in workbench_source
+    assert "loginState === 'pre_authenticated' && !credentialRef.trim()" in workbench_source
+    assert "missing.push({ key: 'repo'" not in workbench_source
+    assert "missing.push({ key: 'branch'" not in workbench_source
+
+
+def test_execution_records_render_full_error_details():
+    source = _read_source("pages/Executions.tsx")
+
+    assert "<details" in source
+    assert "完整错误" in source
+    assert "whiteSpace: 'pre-wrap'" in source
+    assert "textOverflow: 'ellipsis'" not in source
+
+
+def test_agent_workbench_has_polished_operational_layout():
+    source = _read_source("pages/AgentWorkbench.tsx")
+
+    assert "workbench-hero" in source
+    assert "agent-rail" in source
+    assert "timeline-panel" in source
+    assert "补齐环境后继续执行" in source

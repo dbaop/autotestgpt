@@ -2,9 +2,11 @@
 Requirement routes.
 """
 
+from datetime import datetime, timezone
+
 from flask import jsonify, request
 
-from models import Requirement, db
+from models import Conversation, Message, Requirement, db
 from service.document_import_service import parse_uploaded_file
 from service.errors import AppError, ValidationError
 from service.requirement_service import (
@@ -14,6 +16,32 @@ from service.requirement_service import (
     list_requirements,
     update_requirement as update_requirement_entity,
 )
+
+
+def _create_requirement_conversation(requirement: Requirement) -> Conversation:
+    """为需求自动创建一条对话，并写入欢迎消息。"""
+    conversation = Conversation(
+        title=f"需求 #{requirement.id} · {(requirement.title or '')[:40]}",
+        requirement_id=requirement.id,
+        status="active",
+    )
+    db.session.add(conversation)
+    db.session.flush()
+
+    welcome = Message(
+        conversation_id=conversation.id,
+        sender="router",
+        agent_type="router",
+        content=(
+            "您好！我是 AutoTestGPT 对话助手。\n\n"
+            "本页用于沟通与需要您确认的问题；完整 Agent 流水、产物与探活状态请查看 **Agent 工作台**。\n\n"
+            "您可以：说明测试需求、补充测试地址/登录方式、回答验证码或权限相关问题。\n"
+            "关联此条需求后，右侧会同步该任务的简要进度与待办。"
+        ),
+    )
+    db.session.add(welcome)
+    db.session.commit()
+    return conversation
 
 
 def get_requirements():
@@ -50,7 +78,14 @@ def get_requirement(req_id):
 def create_requirement():
     try:
         requirement = create_requirement_entity(request.get_json() or {})
-        return jsonify({"message": "Requirement created", "requirement": requirement.to_dict()}), 201
+        conversation = _create_requirement_conversation(requirement)
+        return jsonify(
+            {
+                "message": "Requirement created",
+                "requirement": requirement.to_dict(),
+                "conversation_id": conversation.id,
+            }
+        ), 201
     except AppError as e:
         db.session.rollback()
         return jsonify(e.to_dict()), e.status_code
@@ -83,9 +118,18 @@ def import_requirement():
             knowledge_base_id=knowledge_base_id,
         )
         db.session.add(requirement)
-        db.session.commit()
+        db.session.flush()
 
-        return jsonify({"message": "Requirement imported", "requirement": requirement.to_dict()}), 201
+        # 自动创建关联对话，确保前端"对话协作"里能看到新需求
+        conversation = _create_requirement_conversation(requirement)
+
+        return jsonify(
+            {
+                "message": "Requirement imported",
+                "requirement": requirement.to_dict(),
+                "conversation_id": conversation.id,
+            }
+        ), 201
     except AppError as e:
         db.session.rollback()
         return jsonify(e.to_dict()), e.status_code

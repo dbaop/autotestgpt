@@ -152,9 +152,11 @@ export default function Chat() {
 
   useEffect(() => {
     loadConversations()
+    const convListTimer = window.setInterval(loadConversations, 8000)
     return () => {
       if (sseRef.current) sseRef.current.close()
       if (contextPollRef.current) clearInterval(contextPollRef.current)
+      window.clearInterval(convListTimer)
     }
   }, [])
 
@@ -177,7 +179,13 @@ export default function Chat() {
   }, [messages, streamingContent, toolCalls])
 
   const loadConversations = async () => {
-    try { const r = await conversationsApi.list(); setConversations(r.data.items) }
+    try {
+      const r = await conversationsApi.list()
+      setConversations(r.data.items)
+      // 通知 Layout 刷新侧边栏总未读数
+      const total = (r.data.items || []).reduce((sum, c) => sum + (c.unread_count || 0), 0)
+      window.dispatchEvent(new CustomEvent('autotestgpt:chat-unread', { detail: { total } }))
+    }
     catch { console.error('加载对话列表失败') }
   }
 
@@ -202,6 +210,13 @@ export default function Chat() {
       setAgentContext(r.data.agent_context || null)
       setStreamingContent(''); setStreamingAgent(''); setToolCalls([])
       setActiveQuestion(null); setCurrentPhase('')
+      // 选中后清零侧栏未读
+      setConversations(prev => {
+        const next = prev.map(c => c.id === id ? { ...c, unread_count: 0 } : c)
+        const total = next.reduce((sum, c) => sum + (c.unread_count || 0), 0)
+        window.dispatchEvent(new CustomEvent('autotestgpt:chat-unread', { detail: { total } }))
+        return next
+      })
       // Connect SSE for real-time streaming
       connectSSE(id)
       // Fallback polling for agent context
@@ -235,6 +250,23 @@ export default function Chat() {
 
     try {
       const r = await conversationsApi.sendMessage(currentConv.id, userInput)
+      if (r.data.started_from_chat && r.data.requirement_id) {
+        const requirementId = r.data.requirement_id
+        setCurrentConv(prev => prev ? {
+          ...prev,
+          requirement_id: requirementId,
+          title: prev.title.startsWith('需求 #') ? prev.title : `需求 #${requirementId} · ${prev.title}`,
+        } : prev)
+        setConversations(prev => prev.map(conv => conv.id === currentConv.id ? {
+          ...conv,
+          requirement_id: requirementId,
+          title: conv.title.startsWith('需求 #') ? conv.title : `需求 #${requirementId} · ${conv.title}`,
+        } : conv))
+        loadAgentContext(currentConv.id)
+        if (!contextPollRef.current) {
+          contextPollRef.current = window.setInterval(() => loadAgentContext(currentConv.id), 5000)
+        }
+      }
       if (r.data.orchestrator_mode) {
         // Orchestrator mode — events come via SSE, no need to reload messages now
         if (r.data.agent_context) setAgentContext(r.data.agent_context)
@@ -328,11 +360,28 @@ export default function Chat() {
                   }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontFamily: C.display, fontSize: 13, fontWeight: 600, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {conv.title}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ flex: 1, minWidth: 0, fontFamily: C.display, fontSize: 13, fontWeight: 600, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {conv.title}
+                        </div>
+                        {conv.unread_count > 0 && (
+                          <span
+                            title={`${conv.unread_count} 条未读`}
+                            style={{
+                              flexShrink: 0, minWidth: 20, height: 20, padding: '0 6px',
+                              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                              fontFamily: C.mono, fontSize: 10, fontWeight: 800, color: '#050810',
+                              background: 'linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald))',
+                              borderRadius: 10, boxShadow: '0 0 8px rgba(0,212,255,0.4)',
+                            }}
+                          >
+                            {conv.unread_count > 99 ? '99+' : conv.unread_count}
+                          </span>
+                        )}
                       </div>
                       <div style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, marginTop: 4 }}>
                         {conv.message_count} msgs
+                        {conv.requirement_id && ` · req#${conv.requirement_id}`}
                       </div>
                     </div>
                     <button onClick={(e) => deleteConversation(conv.id, e)}
@@ -416,7 +465,7 @@ export default function Chat() {
                 选择对话或新建对话开始
               </div>
               <div style={{ fontFamily: C.mono, fontSize: 11, color: C.text3 }}>
-                multi_agent collaboration
+                新建对话后输入需求，Agent 会自动补齐信息并启动测试
               </div>
             </div>
           </div>
@@ -639,7 +688,7 @@ export default function Chat() {
               </div>
 
               <p style={{ margin: '12px 0 0', fontSize: 11, color: C.text3, paddingLeft: 4 }}>
-                完整 Agent 事件与产物请在工作台查看；此处仅沟通与待确认项。
+                输入需求后，Agent 会自动补齐信息并启动测试；完整事件与产物请在工作台查看。
               </p>
             </div>
           </>

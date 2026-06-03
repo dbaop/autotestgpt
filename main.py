@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 from sqlalchemy import text, inspect
+from sqlalchemy.engine import make_url
 from flask_cors import CORS
 import logging
 from logging.handlers import RotatingFileHandler
@@ -22,6 +23,7 @@ from api import api_blueprint
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from service.errors import AppError
 from service.flow_service import execute_flow_async as execute_flow_async_service
+from service.schema_guard import allows_schema_bootstrap, schema_bootstrap_blocked_message
 
 FRONTEND_DIST = project_root / 'autotestgptFront' / 'dist'
 
@@ -84,7 +86,11 @@ def ensure_database_structure():
     with app.app_context():
         try:
             db.session.execute(text('SELECT 1 FROM requirements LIMIT 1'))
-        except (OperationalError, ProgrammingError):
+        except (OperationalError, ProgrammingError) as exc:
+            if not allows_schema_bootstrap(db.engine.dialect.name):
+                message = schema_bootstrap_blocked_message()
+                app.logger.error(message)
+                raise RuntimeError(message) from exc
             app.logger.info('Database tables not found, creating new tables')
             db.create_all()
             app.logger.info('Database tables created')
@@ -128,6 +134,9 @@ def _ensure_all_columns():
         ('requirements', 'conversation_messages',
          'ALTER TABLE requirements ADD COLUMN conversation_messages JSON',
          'ALTER TABLE requirements ADD COLUMN conversation_messages JSON NULL'),
+        ('conversations', 'last_read_at',
+         'ALTER TABLE conversations ADD COLUMN last_read_at DATETIME',
+         'ALTER TABLE conversations ADD COLUMN last_read_at DATETIME NULL'),
     ]
     for table, col, sqlite_ddl, mysql_ddl in migrations:
         try:
@@ -266,14 +275,21 @@ def get_test_scripts():
         return jsonify({'error': str(e)}), 500
 
 
+def _safe_database_info(database_uri: str) -> str:
+    try:
+        rendered = make_url(database_uri).render_as_string(hide_password=True)
+    except Exception:
+        return '<configured database>'
+    return rendered.split('://', 1)[1] if '://' in rendered else rendered
+
+
 if __name__ == '__main__':
     print('=' * 50)
     print('AutoTestGPT Service Start')
     print('Version: 1.0.0')
     print(f'Time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
     print(f'Port: {Config.SERVER_PORT}')
-    db_info = Config.DATABASE_URI.split('://')[1] if '://' in Config.DATABASE_URI else Config.DATABASE_URI
-    print(f'Database: {db_info}')
+    print(f'Database: {_safe_database_info(Config.DATABASE_URI)}')
     print('=' * 50)
 
     os.makedirs(Config.WORKSPACE, exist_ok=True)

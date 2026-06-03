@@ -3,9 +3,42 @@
 """
 
 from flask import request, jsonify
-from models import db, Conversation, Message
+from models import db, Conversation, Message, Requirement
 from datetime import datetime, timezone
 import json
+
+
+def _title_from_message(content: str) -> str:
+    first_line = (content or "").strip().splitlines()[0] if (content or "").strip() else ""
+    if not first_line:
+        return "对话需求"
+    return first_line[:60] + ("..." if len(first_line) > 60 else "")
+
+
+def _bootstrap_requirement_from_chat(conversation: Conversation, content: str) -> Requirement | None:
+    if conversation.requirement_id:
+        return None
+
+    demand = (content or "").strip()
+    if not demand:
+        return None
+
+    title = _title_from_message(demand)
+    requirement = Requirement(
+        title=title,
+        description=demand[:100] + ("..." if len(demand) > 100 else ""),
+        raw_text=demand,
+        structured_data={"source": "chat"},
+        execution_progress={"source": "chat", "auto_complete": True},
+        status="pending",
+    )
+    db.session.add(requirement)
+    db.session.flush()
+
+    conversation.requirement_id = requirement.id
+    conversation.title = f"需求 #{requirement.id} · {title}"
+    db.session.commit()
+    return requirement
 
 
 def get_conversations():
@@ -69,6 +102,10 @@ def get_conversation(conv_id):
         conversation = db.get_or_404(Conversation, conv_id)
         messages = Message.query.filter_by(conversation_id=conv_id).order_by(Message.created_at).all()
 
+        # 打开对话即视为已读：刷新 last_read_at，清零未读
+        conversation.last_read_at = datetime.now(timezone.utc)
+        db.session.commit()
+
         from service.chat_summary_service import build_chat_agent_context_for_conversation
 
         result = conversation.to_dict()
@@ -89,6 +126,18 @@ def delete_conversation(conv_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': '删除对话失败', 'message': str(e)}), 500
+
+
+def mark_conversation_read(conv_id):
+    """显式将对话标记为已读（用于前端 SSE 收到新消息后即时清零未读数）。"""
+    try:
+        conversation = db.get_or_404(Conversation, conv_id)
+        conversation.last_read_at = datetime.now(timezone.utc)
+        db.session.commit()
+        return jsonify({'message': 'marked read', 'conversation_id': conv_id, 'unread_count': conversation.unread_count()})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': '标记已读失败', 'message': str(e)}), 500
 
 
 def get_agent_context(conv_id):
@@ -153,6 +202,7 @@ def send_message(conv_id):
             return jsonify({'error': '消息内容不能为空'}), 400
 
         conversation = db.get_or_404(Conversation, conv_id)
+        bootstrapped_requirement = _bootstrap_requirement_from_chat(conversation, data['content'])
 
         # 防重复：检查最近3秒内是否有相同内容的消息
         recent = Message.query.filter_by(
@@ -204,9 +254,17 @@ def send_message(conv_id):
             return jsonify({
                 'message': '已接收，Agent 正在处理...',
                 'orchestrator_mode': True,
+                'started_from_chat': bool(bootstrapped_requirement),
+                'requirement_id': conversation.requirement_id,
             }), 202
 
         # Legacy chat mode
+        flow_result = None
+        if bootstrapped_requirement:
+            from service.flow_service import enqueue_requirement_flow
+
+            flow_result = enqueue_requirement_flow(bootstrapped_requirement)
+
         messages = _visible_messages(
             Message.query.filter_by(conversation_id=conv_id).order_by(Message.created_at).all()
         )
@@ -215,6 +273,9 @@ def send_message(conv_id):
             'messages': [msg.to_dict() for msg in messages],
             'last_id': messages[-1].id if messages else 0,
             'agent_context': build_chat_agent_context_for_conversation(conv_id),
+            'started_from_chat': bool(bootstrapped_requirement),
+            'requirement_id': conversation.requirement_id,
+            'flow': flow_result,
         })
     except Exception as e:
         db.session.rollback()

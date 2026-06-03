@@ -71,6 +71,33 @@ function FilterButton({ label, active, onClick, color }: { label: string; active
   )
 }
 
+function ErrorDetails({ message }: { message?: string }) {
+  if (!message) {
+    return <span style={{ color: S.text3, fontFamily: S.mono, fontSize: 11 }}>--</span>
+  }
+
+  const preview = message.length > 120 ? `${message.slice(0, 120)}...` : message
+  return (
+    <details className="execution-error-details">
+      <summary>
+        <span>{preview}</span>
+        <strong>完整错误</strong>
+      </summary>
+      <pre style={{
+        margin: '10px 0 0',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        fontFamily: S.mono,
+        fontSize: 11,
+        lineHeight: 1.7,
+        color: 'var(--accent-magenta)',
+      }}>
+        {message}
+      </pre>
+    </details>
+  )
+}
+
 export default function Executions() {
   const [items, setItems] = useState<ExecutionRecord[]>([])
   const [loading, setLoading] = useState(true)
@@ -174,12 +201,7 @@ export default function Executions() {
                       </span>
                     </td>
                     <td>
-                      <span style={{
-                        fontFamily: S.mono, fontSize: 11, color: 'var(--accent-magenta)',
-                        maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block',
-                      }}>
-                        {ex.error_message || '--'}
-                      </span>
+                      <ErrorDetails message={ex.error_message} />
                     </td>
                   </tr>
                 )
