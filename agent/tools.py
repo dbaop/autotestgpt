@@ -148,6 +148,17 @@ def tool_browser_exec_js(code: str) -> Dict[str, Any]:
     return _get_probe().execute_js(code)
 
 
+def tool_browser_extract_content() -> Dict[str, Any]:
+    """Extract the main text content from the current page as markdown.
+
+    Handles DingTalk docs, Feishu, Yuque, Notion, Google Docs, and generic pages.
+    Returns title, URL, and extracted content. Use this after browser_navigate
+    to pull requirement text from online documents without copy-paste.
+    """
+    logger.info("Tool browser_extract_content")
+    return _get_probe().extract_content()
+
+
 def tool_read_workspace_file(file_path: str) -> str:
     """Read a file from the workspace directory (for reviewing generated code)."""
     full_path = os.path.join(Config.WORKSPACE, file_path)
@@ -297,14 +308,23 @@ TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             "code": {"type": "string", "description": "JavaScript code to execute"},
         },
     },
+    "browser_extract_content": {
+        "function": tool_browser_extract_content,
+        "description": "Extract the main text content from the current page as markdown. "
+                       "Works with DingTalk docs, Feishu, Yuque, Notion, Google Docs, Confluence, "
+                       "and generic web pages. Returns title, URL, and formatted content. "
+                       "Use this to pull requirement text from online documents without copy-paste.",
+        "parameters": {},
+    },
 }
 
 # Tool sets per agent type
 AGENT_TOOLS: Dict[str, List[str]] = {
-    "req_agent": ["search_knowledge_base", "ask_user", "get_requirement_environment"],
+    "req_agent": ["search_knowledge_base", "ask_user", "get_requirement_environment", "browser_extract_content", "browser_navigate"],
     "browser_agent": [
         "browser_navigate", "browser_snapshot", "browser_screenshot",
         "browser_click", "browser_fill", "browser_get_network", "browser_exec_js",
+        "browser_extract_content",
         "get_requirement_environment", "ask_user",
     ],
     "case_agent": ["search_knowledge_base", "find_reusable_suites", "ask_user", "get_requirement_environment"],

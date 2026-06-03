@@ -204,6 +204,23 @@ def _ensure_default_project():
 app = create_app()
 ensure_database_structure()
 
+# 数据安全：MySQL → 本地 SQLite 自动备份 + 空库检测自动恢复
+from service.data_safety_service import run_startup_safety_check
+run_startup_safety_check(Config.DATABASE_URI, app)
+
+# 检测 CDP（Chrome 远程调试）是否可用；不可用时自动 fallback 到独立 Chromium
+def _check_cdp_availability():
+    try:
+        import urllib.request, json as _json
+        req = urllib.request.Request("http://localhost:9222/json/version")
+        resp = urllib.request.urlopen(req, timeout=3)
+        data = _json.loads(resp.read())
+        app.logger.info("CDP bridge: using user's Chrome %s (authenticated)", data.get("Browser", "unknown"))
+    except Exception:
+        app.logger.info("CDP not available — will launch standalone Chromium (profile: workspace/browser_profile/)")
+
+_check_cdp_availability()
+
 
 # ---------------------------------------------------------------------------
 # 工作流异步执行

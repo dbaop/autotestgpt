@@ -227,7 +227,8 @@ export interface FlowResumeResponse {
 }
 
 export interface FlowStartPayload {
-  demand: string
+  demand?: string
+  doc_url?: string
   title?: string
   project_id?: number
   knowledge_base_id?: number | null

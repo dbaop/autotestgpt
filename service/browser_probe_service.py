@@ -1,56 +1,95 @@
 """
-Browser probe service — connects to an existing Chrome instance via CDP.
+Browser probe service — connects to Chrome via CDP or launches its own Chromium.
 
-Uses Playwright's connect_over_cdp to attach to the user's browser (where the
-CDP bridge MCP Chrome extension is already installed).  All methods are
-synchronous so they can be called directly from agent tool functions.
+Priority:
+  1. Connect to existing Chrome via CDP (user's authenticated sessions)
+  2. Launch Playwright's own Chromium with persistent context (saves cookies)
+
+All methods are synchronous so they can be called directly from agent tool functions.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 _CDP_ENDPOINT = "http://localhost:9222"
 _PAGE_STABILIZE_MS = 1500  # wait for JS frameworks to render
+_USER_DATA_DIR = Path(__file__).resolve().parents[1] / "workspace" / "browser_profile"
 
 
 class BrowserProbe:
-    """Lightweight browser controller backed by Playwright-over-CDP."""
+    """Lightweight browser controller backed by Playwright."""
 
     def __init__(self, cdp_endpoint: str = _CDP_ENDPOINT):
         self._cdp_endpoint = cdp_endpoint
         self._playwright = None
         self._browser = None
         self._page = None
+        self._mode: str = ""  # "cdp" or "standalone"
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def connect(self) -> bool:
-        """Connect to the existing Chrome instance.  Returns True on success."""
+        """Connect to Chrome. Tries CDP first, falls back to launching Chromium."""
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
             logger.error("Playwright is not installed; run: pip install playwright && playwright install chromium")
             return False
 
+        # ——— Strategy 1: connect to existing Chrome via CDP ———
+        if self._try_cdp_connect():
+            return True
+
+        # ——— Strategy 2: launch standalone Chromium ———
+        return self._try_standalone_launch()
+
+    def _try_cdp_connect(self) -> bool:
         try:
+            from playwright.sync_api import sync_playwright
             self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.connect_over_cdp(self._cdp_endpoint, timeout=10000)
+            self._browser = self._playwright.chromium.connect_over_cdp(self._cdp_endpoint, timeout=5000)
             pages = self._browser.contexts[0].pages if self._browser.contexts else []
             self._page = pages[0] if pages else self._browser.contexts[0].new_page()
+            self._mode = "cdp"
             logger.info("Connected to Chrome via CDP at %s", self._cdp_endpoint)
             return True
         except Exception as exc:
-            logger.warning("Failed to connect to Chrome CDP at %s: %s", self._cdp_endpoint, exc)
-            self.disconnect()
+            logger.info("CDP connect failed (%s), falling back to standalone Chromium...", exc)
+            self._disconnect_current()
             return False
 
-    def disconnect(self):
+    def _try_standalone_launch(self) -> bool:
+        try:
+            from playwright.sync_api import sync_playwright
+            if self._playwright is None:
+                self._playwright = sync_playwright().start()
+
+            _USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+            context = self._playwright.chromium.launch_persistent_context(
+                str(_USER_DATA_DIR),
+                headless=False,
+                args=["--no-sandbox", "--disable-setuid-sandbox"],
+                viewport={"width": 1440, "height": 900},
+            )
+            self._browser = context
+            pages = context.pages
+            self._page = pages[0] if pages else context.new_page()
+            self._mode = "standalone"
+            logger.info("Launched standalone Chromium (profile: %s)", _USER_DATA_DIR)
+            return True
+        except Exception as exc:
+            logger.error("Failed to launch Chromium: %s", exc)
+            self._disconnect_current()
+            return False
+
+    def _disconnect_current(self):
         try:
             if self._browser:
                 self._browser.close()
@@ -64,10 +103,18 @@ class BrowserProbe:
         self._page = None
         self._browser = None
         self._playwright = None
+        self._mode = ""
+
+    def disconnect(self):
+        self._disconnect_current()
 
     @property
     def is_connected(self) -> bool:
         return self._page is not None and self._browser is not None
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     # ------------------------------------------------------------------
     # High-level operations (used by agent tools)
@@ -76,7 +123,7 @@ class BrowserProbe:
     def navigate(self, url: str) -> Dict[str, Any]:
         """Navigate to *url* and return page metadata after stabilisation."""
         if not self.is_connected and not self.connect():
-            return {"ok": False, "error": "Could not connect to Chrome via CDP. Is Chrome running with --remote-debugging-port=9222?"}
+            return {"ok": False, "error": "Could not start browser. Install Chromium: playwright install chromium"}
 
         try:
             self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -203,6 +250,108 @@ class BrowserProbe:
         try:
             result = self._page.evaluate(code)
             return {"ok": True, "result": result}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def extract_content(self) -> Dict[str, Any]:
+        """Extract the main text content from the current page as markdown.
+
+        Handles online doc platforms (DingTalk, Feishu, Yuque, Notion, Google Docs)
+        by targeting their content containers, then falls back to extracting all
+        visible text from <body>.
+        """
+        if not self.is_connected:
+            return {"ok": False, "error": "Browser not connected."}
+
+        try:
+            content = self._page.evaluate("""() => {
+                // Platform-specific selectors for doc content
+                const platformSelectors = [
+                    // DingTalk / 钉钉文档
+                    '[class*="doc-content"]', '[class*="document-content"]',
+                    '[class*="ak-content"]', '[class*="editor-content"]',
+                    '.dingtalk-doc-content', '[data-testid="doc-body"]',
+                    // Feishu / 飞书文档
+                    '[class*="docx-content"]', '[class*="lark-doc"]',
+                    '.block-content', '[data-zone-id="page-content"]',
+                    // Yuque / 语雀
+                    '.yuque-doc-content', '[class*="lake-content"]',
+                    '.ne-viewer-body',
+                    // Notion
+                    '.notion-page-content', '[class*="notion-page"]',
+                    // Google Docs
+                    '.kix-page-content', '#docs-editor',
+                    // Generic fallbacks
+                    'article', 'main', '[role="main"]', '.content', '.markdown-body',
+                    '.prose', '#content', '.post-content', '.article-content',
+                ];
+
+                let container = null;
+                for (const sel of platformSelectors) {
+                    container = document.querySelector(sel);
+                    if (container && container.textContent.trim().length > 100) break;
+                }
+
+                // Fallback to body
+                if (!container || container.textContent.trim().length < 50) {
+                    container = document.body;
+                }
+
+                // Extract headings and paragraphs
+                const parts = [];
+                const walker = document.createTreeWalker(
+                    container,
+                    NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+                    {
+                        acceptNode: function(node) {
+                            if (node.nodeType === 3) { // text node
+                                const txt = node.textContent.trim();
+                                return txt.length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+                            }
+                            const tag = node.tagName;
+                            if (tag && /^H[1-6]$/.test(tag)) return NodeFilter.FILTER_ACCEPT;
+                            if (tag === 'P' || tag === 'LI' || tag === 'TD' || tag === 'TH') return NodeFilter.FILTER_ACCEPT;
+                            if (tag === 'BLOCKQUOTE' || tag === 'PRE' || tag === 'CODE') return NodeFilter.FILTER_ACCEPT;
+                            return NodeFilter.FILTER_SKIP;
+                        }
+                    }
+                );
+
+                let node;
+                while (node = walker.nextNode()) {
+                    if (node.nodeType === 3) {
+                        const txt = node.textContent.trim();
+                        if (txt) parts.push(txt);
+                    } else {
+                        const tag = node.tagName;
+                        const text = node.textContent.trim();
+                        if (!text) continue;
+                        if (tag === 'H1') parts.push('\\n# ' + text + '\\n');
+                        else if (tag === 'H2') parts.push('\\n## ' + text + '\\n');
+                        else if (tag === 'H3') parts.push('\\n### ' + text + '\\n');
+                        else if (tag === 'H4') parts.push('\\n#### ' + text + '\\n');
+                        else if (tag === 'LI') parts.push('- ' + text);
+                        else if (tag === 'BLOCKQUOTE') parts.push('> ' + text);
+                        else if (tag === 'PRE' || tag === 'CODE') parts.push('```\\n' + text + '\\n```');
+                        else parts.push(text);
+                    }
+                }
+
+                return {
+                    title: document.title,
+                    url: window.location.href,
+                    content: parts.join('\\n'),
+                    length: parts.join('\\n').length,
+                };
+            }""")
+
+            return {
+                "ok": True,
+                "title": content.get("title", self._page.title()),
+                "url": content.get("url", self._page.url),
+                "content": content.get("content", ""),
+                "length": content.get("length", 0),
+            }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

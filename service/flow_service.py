@@ -77,12 +77,63 @@ def execute_flow_async(flow, flow_data, requirement_id):
         _execute_flow_async_impl(flow, flow_data, requirement_id)
 
 
+def _extract_doc_from_url(url: str) -> str | None:
+    """Try to extract document content from *url* via CDP browser probe."""
+    try:
+        from service.browser_probe_service import get_browser_probe
+        probe = get_browser_probe()
+        nav = probe.navigate(url)
+        if not nav.get("ok"):
+            logger.warning("CDP navigate failed for %s: %s", url, nav.get("error", "unknown"))
+            return None
+        result = probe.extract_content()
+        if result.get("ok") and result.get("length", 0) > 50:
+            logger.info("CDP extracted %d chars from %s", result["length"], url)
+            return (
+                f"【来源】{result.get('url', url)}\n"
+                f"【标题】{result.get('title', '')}\n\n"
+                f"{result.get('content', '')}"
+            )
+        logger.warning("CDP extracted too little content from %s: %d chars", url, result.get("length", 0))
+        return None
+    except Exception as exc:
+        logger.warning("CDP extraction failed for %s: %s", url, exc)
+        return None
+
+
 def start_flow(data: dict):
     demand = (data.get("demand") or "").strip()
+    doc_url = (data.get("doc_url") or "").strip()
+
+    # 如果提供了文档 URL（钉钉/飞书/语雀等），通过 CDP 自动提取内容
+    if doc_url and not demand:
+        extracted = _extract_doc_from_url(doc_url)
+        if extracted:
+            demand = extracted
+        else:
+            # CDP 提取失败时，把 URL 当作需求描述，让 agent 自己去打开
+            demand = f"请打开以下文档链接并提取测试需求:\n{doc_url}"
+
     if not demand:
-        raise ValidationError("Please provide `demand` field")
+        raise ValidationError("Please provide `demand` or `doc_url` field")
 
     project_id = data.get("project_id", 1)
+    # 保存原始文档 URL 供后续参考
+    original_doc_url = doc_url or None
+    test_environment = data.get("test_environment") or {}
+    structured_seed = {"test_environment": test_environment}
+    if original_doc_url:
+        structured_seed["doc_url"] = original_doc_url
+    requirement = Requirement(
+        title=data.get("title") or f"Requirement-{_now().strftime('%Y%m%d-%H%M%S')}",
+        description=demand[:100] + "..." if len(demand) > 100 else demand,
+        raw_text=demand,
+        structured_data=structured_seed,
+        status="pending",
+        execution_progress={"test_environment": test_environment} if test_environment else None,
+        knowledge_base_id=data.get("knowledge_base_id"),
+        project_id=project_id,
+    )
     test_environment = data.get("test_environment") or {}
     structured_seed = {"test_environment": test_environment} if test_environment else None
     requirement = Requirement(

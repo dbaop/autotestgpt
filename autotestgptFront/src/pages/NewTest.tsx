@@ -9,7 +9,7 @@ const defaultDemand = `会员中心登录需求
 4. 连续多次输错验证码后需要触发重试限制策略
 5. 登录成功后进入会员中心首页`
 
-type InputMode = 'text' | 'file'
+type InputMode = 'text' | 'file' | 'url'
 type FileTarget = 'requirement' | 'knowledge'
 
 const C = {
@@ -70,6 +70,7 @@ export default function NewTest() {
   const [fileTarget, setFileTarget] = useState<FileTarget>('requirement')
   const [title, setTitle] = useState('会员中心登录需求')
   const [demand, setDemand] = useState(defaultDemand)
+  const [docUrl, setDocUrl] = useState('')
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState<number | ''>('')
@@ -95,6 +96,9 @@ export default function NewTest() {
   }, [])
 
   const canSubmit = useMemo(() => {
+    if (inputMode === 'url') {
+      return title.trim().length > 0 && docUrl.trim().length > 0
+    }
     if (inputMode === 'text') {
       const hasRequirement = title.trim().length > 0 && demand.trim().length > 0
       if (!hasRequirement) return false
@@ -105,7 +109,7 @@ export default function NewTest() {
     if (!uploadFile) return false
     if (fileTarget === 'knowledge') return !!selectedKnowledgeBaseId
     return title.trim().length > 0
-  }, [demand, fileTarget, inputMode, reviewBranch, reviewDays, reviewEnabled, reviewRepoType, reviewRepoUrl, reviewRepoPath, selectedKnowledgeBaseId, title, uploadFile])
+  }, [demand, docUrl, fileTarget, inputMode, reviewBranch, reviewDays, reviewEnabled, reviewRepoType, reviewRepoUrl, reviewRepoPath, selectedKnowledgeBaseId, title, uploadFile])
 
   const selectedKnowledgeBase = useMemo(
     () => knowledgeBases.find(item => item.id === selectedKnowledgeBaseId) || null,
@@ -126,15 +130,21 @@ export default function NewTest() {
   }
 
   const handleTextFlowStart = async () => {
-    const res = await flowApi.start({
-      title: title.trim(), demand: demand.trim(), project_id: 1,
+    const payload: any = {
+      title: title.trim(), project_id: 1,
       knowledge_base_id: selectedKnowledgeBaseId || undefined,
       review: reviewEnabled ? (
         reviewRepoType === 'local'
           ? { repo_path: reviewRepoPath.trim(), branch: reviewBranch.trim(), days: reviewDays }
           : { repo_url: reviewRepoUrl.trim(), branch: reviewBranch.trim(), days: reviewDays }
       ) : undefined,
-    })
+    }
+    if (inputMode === 'url') {
+      payload.doc_url = docUrl.trim()
+    } else {
+      payload.demand = demand.trim()
+    }
+    const res = await flowApi.start(payload)
     // 跳转到对话协作，让用户立刻看到与该需求绑定的自动创建的对话（含未读消息）
     if (res.data.conversation_id) {
       navigate('/chat', { state: { conversationId: res.data.conversation_id } })
@@ -217,8 +227,9 @@ export default function NewTest() {
             )}
 
             {/* Mode selection */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
               <ModeCard active={inputMode === 'text'} kicker="Text" title="直接输入需求" description="会议纪要、临时分析、补充验收条件，提交后启动多 Agent 主流程。" onClick={() => setInputMode('text')} accent="var(--accent-cyan)" />
+              <ModeCard active={inputMode === 'url'} kicker="URL" title="钉钉/飞书文档链接" description="粘贴钉钉文档、语雀、飞书、Notion 链接，CDP 自动打开页面提取内容为需求。" onClick={() => setInputMode('url')} accent="var(--accent-violet)" />
               <ModeCard active={inputMode === 'file'} kicker="File" title="导入需求或知识文档" description="txt / md / csv / json / log / xlsx / docx / pdf，转为 Requirement 或知识条目。" onClick={() => setInputMode('file')} accent="var(--accent-amber)" />
             </div>
 
@@ -229,7 +240,22 @@ export default function NewTest() {
               />
             </div>
 
-            {inputMode === 'text' ? (
+            {inputMode === 'url' ? (
+              <div>
+                <label style={{ fontFamily: C.mono, fontSize: 10, fontWeight: 600, letterSpacing: '0.14em', color: C.text3, display: 'block', marginBottom: 8, textTransform: 'uppercase' }}>doc_url</label>
+                <input value={docUrl} onChange={e => setDocUrl(e.target.value)}
+                  placeholder="https://alidocs.dingtalk.com/...  或  https://xxx.yuque.com/...  或  https://xxx.feishu.cn/..."
+                  style={{
+                    width: '100%', padding: '14px 18px', background: 'rgba(255,255,255,0.03)',
+                    border: '1px solid var(--border-subtle)', borderRadius: 14, color: C.text, fontFamily: C.mono, fontSize: 13,
+                  }}
+                />
+                <p style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, marginTop: 8 }}>
+                  粘贴钉钉文档/语雀/飞书/Notion 链接。CDP 会自动用你的 Chrome 打开（免登录），提取页面正文作为需求输入。<br />
+                  {docUrl && '提交后 → CDP 打开链接 → 提取文档内容 → 需求解析 → 用例设计 → 脚本生成 → 执行'}
+                </p>
+              </div>
+            ) : inputMode === 'text' ? (
               <div>
                 <label style={{ fontFamily: C.mono, fontSize: 10, fontWeight: 600, letterSpacing: '0.14em', color: C.text3, display: 'block', marginBottom: 8, textTransform: 'uppercase' }}>demand_content</label>
                 <textarea value={demand} onChange={e => setDemand(e.target.value)} rows={10}
@@ -450,10 +476,10 @@ export default function NewTest() {
               borderTop: '1px solid var(--border-subtle)', paddingTop: 20,
             }}>
               <span style={{ fontFamily: C.mono, fontSize: 11, color: C.text3 }}>
-                {inputMode === 'text' ? '文本输入 -> 流程执行 -> 报告生成' : fileTarget === 'requirement' ? '文件导入 -> 生成需求 -> 详情处理' : '文件导入 -> 沉淀知识库'}
+                {inputMode === 'url' ? '粘贴链接 → CDP提取内容 → 流程执行 → 报告生成' : inputMode === 'text' ? '文本输入 -> 流程执行 -> 报告生成' : fileTarget === 'requirement' ? '文件导入 -> 生成需求 -> 详情处理' : '文件导入 -> 沉淀知识库'}
               </span>
               <button type="submit" disabled={loading} className="btn btn-primary">
-                {loading ? '处理中...' : inputMode === 'text' ? '启动流程' : fileTarget === 'requirement' ? '导入为需求' : '导入到知识库'}
+                {loading ? '处理中...' : inputMode === 'url' ? '提取文档并启动' : inputMode === 'text' ? '启动流程' : fileTarget === 'requirement' ? '导入为需求' : '导入到知识库'}
               </button>
             </div>
           </form>
@@ -503,7 +529,7 @@ export default function NewTest() {
               current_selection
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <InfoRow label="输入模式" value={inputMode === 'text' ? '直接输入需求' : '导入文件'} />
+              <InfoRow label="输入模式" value={inputMode === 'url' ? '粘贴文档链接（CDP自动提取）' : inputMode === 'text' ? '直接输入需求' : '导入文件'} />
               <InfoRow label="文件目标" value={inputMode === 'text' ? '直接跑流程' : fileTarget === 'requirement' ? '创建 Requirement' : '沉淀到知识库'} />
               <InfoRow label="绑定知识库" value={selectedKnowledgeBase?.name || '未绑定'} />
               <InfoRow label="代码 Review" value={reviewEnabled ? (reviewRepoType === 'local' ? '本地仓库' : '远程仓库') + ` / ${reviewBranch} / ${reviewDays}d` : '未纳入'} />
