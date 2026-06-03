@@ -1,9 +1,11 @@
 """
-Browser probe service — connects to Chrome via CDP or launches its own Chromium.
+Browser probe service — connects to Chrome via CDP Bridge MCP, direct CDP, or
+launches standalone Chromium.
 
 Priority:
-  1. Connect to existing Chrome via CDP (user's authenticated sessions)
-  2. Launch Playwright's own Chromium with persistent context (saves cookies)
+  1. CDP Bridge MCP server (user's Chrome via extension — has DingTalk auth)
+  2. Chrome CDP directly (--remote-debugging-port)
+  3. Playwright standalone Chromium (last resort)
 
 All methods are synchronous so they can be called directly from agent tool functions.
 """
@@ -17,38 +19,62 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _CDP_ENDPOINT = "http://localhost:9222"
+_CDP_MCP_URL = "http://localhost:18700"
 _PAGE_STABILIZE_MS = 1500  # wait for JS frameworks to render
 _USER_DATA_DIR = Path(__file__).resolve().parents[1] / "workspace" / "browser_profile"
 
+# User's actual Chrome profile — used for DingTalk/Feishu auth cookies
+def _find_chrome_profile() -> str | None:
+    import os
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if local_app_data:
+        default_profile = Path(local_app_data) / "Google" / "Chrome" / "User Data"
+        if default_profile.exists():
+            return str(default_profile)
+    return None
+
 
 class BrowserProbe:
-    """Lightweight browser controller backed by Playwright."""
+    """Lightweight browser controller with multi-backend support."""
 
-    def __init__(self, cdp_endpoint: str = _CDP_ENDPOINT):
+    def __init__(self, cdp_endpoint: str = _CDP_ENDPOINT, cdp_mcp_url: str = _CDP_MCP_URL):
         self._cdp_endpoint = cdp_endpoint
+        self._cdp_mcp_url = cdp_mcp_url
         self._playwright = None
         self._browser = None
         self._page = None
-        self._mode: str = ""  # "cdp" or "standalone"
+        self._mcp_client = None  # CdpBridgeClient instance
+        self._mode: str = ""  # "mcp", "cdp", or "standalone"
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def connect(self) -> bool:
-        """Connect to Chrome. Tries CDP first, falls back to launching Chromium."""
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            logger.error("Playwright is not installed; run: pip install playwright && playwright install chromium")
-            return False
+        """Connect to a browser backend. Tries MCP → CDP → standalone."""
+        # ——— Strategy 1: CDP Bridge MCP (user's Chrome via extension) ———
+        if self._try_mcp_connect():
+            return True
 
-        # ——— Strategy 1: connect to existing Chrome via CDP ———
+        # ——— Strategy 2: connect to Chrome directly via CDP ———
         if self._try_cdp_connect():
             return True
 
-        # ——— Strategy 2: launch standalone Chromium ———
+        # ——— Strategy 3: launch standalone Chromium ———
         return self._try_standalone_launch()
+
+    def _try_mcp_connect(self) -> bool:
+        try:
+            from service.cdp_bridge_client import CdpBridgeClient
+            self._mcp_client = CdpBridgeClient(self._cdp_mcp_url)
+            if self._mcp_client.initialize():
+                self._mode = "mcp"
+                logger.info("Connected via CDP Bridge MCP at %s", self._cdp_mcp_url)
+                return True
+        except Exception as exc:
+            logger.info("CDP Bridge MCP not available (%s), trying next backend...", exc)
+        self._mcp_client = None
+        return False
 
     def _try_cdp_connect(self) -> bool:
         try:
@@ -71,18 +97,39 @@ class BrowserProbe:
             if self._playwright is None:
                 self._playwright = sync_playwright().start()
 
-            _USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-            context = self._playwright.chromium.launch_persistent_context(
-                str(_USER_DATA_DIR),
-                headless=False,
-                args=["--no-sandbox", "--disable-setuid-sandbox"],
-                viewport={"width": 1440, "height": 900},
-            )
+            # Try user's real Chrome profile first (for DingTalk cookies)
+            user_data_dir = None
+            chrome_profile = _find_chrome_profile()
+            if chrome_profile:
+                try:
+                    context = self._playwright.chromium.launch_persistent_context(
+                        chrome_profile,
+                        headless=False,
+                        args=["--no-sandbox", "--disable-setuid-sandbox"],
+                        viewport={"width": 1440, "height": 900},
+                    )
+                    user_data_dir = chrome_profile
+                    logger.info("Using user Chrome profile: %s", user_data_dir)
+                except Exception as exc:
+                    logger.info("User Chrome profile locked (Chrome is running): %s. Falling back...", exc)
+
+            # Fallback: workspace profile
+            if user_data_dir is None:
+                _USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+                user_data_dir = str(_USER_DATA_DIR)
+                context = self._playwright.chromium.launch_persistent_context(
+                    user_data_dir,
+                    headless=False,
+                    args=["--no-sandbox", "--disable-setuid-sandbox"],
+                    viewport={"width": 1440, "height": 900},
+                )
+                logger.info("Using workspace profile: %s", user_data_dir)
+
             self._browser = context
             pages = context.pages
             self._page = pages[0] if pages else context.new_page()
             self._mode = "standalone"
-            logger.info("Launched standalone Chromium (profile: %s)", _USER_DATA_DIR)
+            logger.info("Launched Chromium (profile: %s)", user_data_dir)
             return True
         except Exception as exc:
             logger.error("Failed to launch Chromium: %s", exc)
@@ -110,6 +157,8 @@ class BrowserProbe:
 
     @property
     def is_connected(self) -> bool:
+        if self._mode == "mcp":
+            return self._mcp_client is not None and self._mcp_client.is_available
         return self._page is not None and self._browser is not None
 
     @property
@@ -122,6 +171,16 @@ class BrowserProbe:
 
     def navigate(self, url: str) -> Dict[str, Any]:
         """Navigate to *url* and return page metadata after stabilisation."""
+        if self._mode == "mcp" and self._mcp_client:
+            result = self._mcp_client.navigate(url)
+            if result.get("ok"):
+                import time
+                time.sleep(1.5)  # stabilise
+                # Get title
+                js = self._mcp_client.execute_js("document.title")
+                result["title"] = js.get("result", "") if js.get("ok") else ""
+            return result
+
         if not self.is_connected and not self.connect():
             return {"ok": False, "error": "Could not start browser. Install Chromium: playwright install chromium"}
 
@@ -137,11 +196,20 @@ class BrowserProbe:
             return {"ok": False, "error": str(exc), "url": url}
 
     def snapshot(self, max_elements: int = 200) -> Dict[str, Any]:
-        """Capture a lightweight DOM / accessibility snapshot.
+        """Capture a lightweight DOM / accessibility snapshot."""
+        if self._mode == "mcp" and self._mcp_client:
+            scan = self._mcp_client.scan(text_only=False)
+            if scan.get("ok"):
+                content = scan.get("content", "")
+                return {
+                    "ok": True,
+                    "url": "",
+                    "title": "",
+                    "elements": [{"tag": "page", "text": content[:5000]}],
+                    "count": 1,
+                }
+            return scan
 
-        Returns interactive elements: buttons, links, inputs, selects, and
-        their visible text, CSS selectors, and ARIA attributes.
-        """
         if not self.is_connected:
             return {"ok": False, "error": "Browser not connected. Call navigate first."}
 
@@ -185,6 +253,9 @@ class BrowserProbe:
 
     def screenshot(self) -> Dict[str, Any]:
         """Take a full-page screenshot, return as base64 PNG data URL."""
+        if self._mode == "mcp" and self._mcp_client:
+            return self._mcp_client.screenshot()
+
         if not self.is_connected:
             return {"ok": False, "error": "Browser not connected."}
 
@@ -202,6 +273,11 @@ class BrowserProbe:
 
     def click(self, selector: str) -> Dict[str, Any]:
         """Click the first element matching a CSS selector."""
+        if self._mode == "mcp" and self._mcp_client:
+            return self._mcp_client.execute_js(
+                f"document.querySelector('{selector}')?.click(); 'clicked'"
+            )
+
         if not self.is_connected:
             return {"ok": False, "error": "Browser not connected."}
 
@@ -214,6 +290,14 @@ class BrowserProbe:
 
     def fill(self, selector: str, value: str) -> Dict[str, Any]:
         """Type *value* into the first input matching *selector*."""
+        if self._mode == "mcp" and self._mcp_client:
+            escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+            return self._mcp_client.execute_js(
+                f"var el=document.querySelector('{selector}');"
+                f"if(el){{el.focus();el.value='{escaped}';"
+                f"el.dispatchEvent(new Event('input',{{bubbles:true}}));'ok'}}else'not found'"
+            )
+
         if not self.is_connected:
             return {"ok": False, "error": "Browser not connected."}
 
@@ -225,6 +309,18 @@ class BrowserProbe:
 
     def get_network_requests(self, limit: int = 50) -> Dict[str, Any]:
         """Return recently captured network requests (URL + status)."""
+        if self._mode == "mcp" and self._mcp_client:
+            js = self._mcp_client.execute_js(
+                f"JSON.stringify(performance.getEntriesByType('resource').slice(-{limit}).map(e=>({{name:e.name,type:e.initiatorType,duration:Math.round(e.duration),size:e.transferSize||0}})))"
+            )
+            if js.get("ok"):
+                import json
+                try:
+                    return {"ok": True, "requests": json.loads(js["result"]), "count": 0}
+                except Exception:
+                    pass
+            return js
+
         if not self.is_connected:
             return {"ok": False, "error": "Browser not connected."}
 
@@ -244,6 +340,9 @@ class BrowserProbe:
 
     def execute_js(self, code: str) -> Dict[str, Any]:
         """Execute arbitrary JavaScript in the page context."""
+        if self._mode == "mcp" and self._mcp_client:
+            return self._mcp_client.execute_js(code)
+
         if not self.is_connected:
             return {"ok": False, "error": "Browser not connected."}
 
@@ -254,11 +353,10 @@ class BrowserProbe:
             return {"ok": False, "error": str(exc)}
 
     def extract_content(self, max_chars: int = 50000) -> Dict[str, Any]:
-        """Extract the main text content from the current page as markdown.
+        """Extract the main text content from the current page as markdown."""
+        if self._mode == "mcp" and self._mcp_client:
+            return self._mcp_client.extract_content()
 
-        Uses innerText on the best-matching content container, which naturally
-        strips <script>, <style>, and hidden elements.  Falls back to body.
-        """
         if not self.is_connected:
             return {"ok": False, "error": "Browser not connected."}
 

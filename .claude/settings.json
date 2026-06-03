@@ -4,7 +4,8 @@
       "Bash(npx tsc:*)",
       "Skill(agent-browser)",
       "Skill(agent-browser:*)",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(pip install *)"
     ]
   }
 }

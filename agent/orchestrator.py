@@ -254,6 +254,10 @@ class ConversationOrchestrator:
         if phase == "parsing":
             base += (
                 "Your task is to understand the user's testing needs. "
+                "IMPORTANT: You are analyzing the SYSTEM/FEATURES described in the user's input, "
+                "NOT the document/URL itself. If the user provides a document link, extract its "
+                "content and base your analysis on what the document DESCRIBES (the business system), "
+                "not on 'document parsing'. "
                 "Use search_knowledge_base to find relevant documentation. "
                 "If information is insufficient, use ask_user to clarify. "
                 "When you have enough information, produce a structured requirement."
@@ -269,16 +273,18 @@ class ConversationOrchestrator:
             )
         elif phase == "designing_cases":
             base += (
-                "Your task is to design detailed test cases. "
-                "Use search_knowledge_base for reference patterns. "
+                "Your task is to design detailed test cases based on the user's requirements. "
+                "Focus on the specific requirement content, not knowledge base patterns. "
+                "Use search_knowledge_base only as supplementary reference. "
                 "Use find_reusable_suites to check for existing suites. "
                 "Ask the user if you need clarification on test scope or priorities."
             )
         elif phase == "generating_code":
             base += (
-                "Your task is to generate executable test scripts (pytest/Playwright). "
+                "Your task is to generate executable test scripts (pytest/Playwright) "
+                "based on the test cases and the page_map (real DOM selectors). "
                 "Use get_requirement_environment first to check for saved URLs/credentials. "
-                "Use search_knowledge_base for API specs and selector patterns. "
+                "Use search_knowledge_base only for supplementary API specs. "
                 "Only ask the user for URLs or credentials if get_requirement_environment returns empty."
             )
         elif phase == "executing":

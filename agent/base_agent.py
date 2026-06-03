@@ -166,11 +166,47 @@ class BaseAgent(ABC):
         if json_str is None:
             json_str = response
 
+        # Try json5 first (handles trailing commas, comments, single quotes)
+        try:
+            import json5
+            return json5.loads(json_str)
+        except Exception:
+            pass
+
         try:
             return json.loads(json_str)
         except json.JSONDecodeError as e:
+            logger.warning(f"JSON解析失败 (尝试修复): {e}")
+            repaired = self._repair_json(json_str)
+            if repaired:
+                try:
+                    result = json.loads(repaired)
+                    logger.info("JSON修复成功")
+                    return result
+                except json.JSONDecodeError:
+                    pass
             logger.error(f"JSON解析失败: {e}, 响应内容前500字符: {response[:500]}...")
             raise ValueError(f"无法解析模型响应为JSON: {e}")
+
+    @staticmethod
+    def _repair_json(text: str) -> Optional[str]:
+        """Attempt to repair common LLM JSON errors."""
+        import re
+        repaired = text
+        # Remove trailing commas before } or ]
+        repaired = re.sub(r',\s*}', '}', repaired)
+        repaired = re.sub(r',\s*\]', ']', repaired)
+        # Remove trailing comma at end of string
+        repaired = re.sub(r',\s*$', '', repaired)
+        # Fix missing comma: "value"\n  "key" → "value",\n  "key"
+        repaired = re.sub(r'"\s*\n\s*"', '",\n  "', repaired)
+        # Fix missing comma: }\n  "key" → },\n  "key"
+        repaired = re.sub(r'}\s*\n\s*"', '},\n  "', repaired)
+        # Fix missing comma: ]\n  "key" → ],\n  "key"
+        repaired = re.sub(r']\s*\n\s*"', '],\n  "', repaired)
+        if repaired == text:
+            return None
+        return repaired
 
     @staticmethod
     def _extract_fenced_json(response: str) -> Optional[str]:

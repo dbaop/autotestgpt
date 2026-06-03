@@ -208,18 +208,35 @@ ensure_database_structure()
 from service.data_safety_service import run_startup_safety_check
 run_startup_safety_check(Config.DATABASE_URI, app)
 
-# 检测 CDP（Chrome 远程调试）是否可用；不可用时自动 fallback 到独立 Chromium
-def _check_cdp_availability():
+# 检测并启动 CDP Bridge MCP server（优先于独立 Chromium）
+def _ensure_cdp_bridge_server():
+    """Try to connect to CDP Bridge MCP server; if not running, start it."""
     try:
         import urllib.request, json as _json
-        req = urllib.request.Request("http://localhost:9222/json/version")
+        req = urllib.request.Request("http://localhost:18700/mcp")
+        req.add_header("Accept", "application/json, text/event-stream")
+        data = _json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                           "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                                      "clientInfo": {"name": "autotestgpt", "version": "1.0"}}}).encode()
+        req.add_header("Content-Type", "application/json")
         resp = urllib.request.urlopen(req, timeout=3)
-        data = _json.loads(resp.read())
-        app.logger.info("CDP bridge: using user's Chrome %s (authenticated)", data.get("Browser", "unknown"))
+        resp.read()
+        app.logger.info("CDP Bridge MCP server already running at localhost:18700")
     except Exception:
-        app.logger.info("CDP not available — will launch standalone Chromium (profile: workspace/browser_profile/)")
+        app.logger.info("Starting CDP Bridge MCP server (uvx cdp-bridge@latest)...")
+        import subprocess, os
+        try:
+            subprocess.Popen(
+                ["uvx", "cdp-bridge@latest", "--transport", "streamable-http",
+                 "--port", "18700", "--ws-port", "18765"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            app.logger.info("CDP Bridge MCP server started on port 18700")
+        except Exception as exc:
+            app.logger.warning("Could not start CDP Bridge MCP server: %s", exc)
 
-_check_cdp_availability()
+_ensure_cdp_bridge_server()
 
 
 # ---------------------------------------------------------------------------

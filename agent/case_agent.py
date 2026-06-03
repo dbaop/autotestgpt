@@ -21,6 +21,7 @@ class CaseAgent(ToolCapableAgent):
         super().__init__(model="gpt-4", temperature=0.1, agent_type="case_agent")
         self.system_prompt = self.custom_system_prompt or """你是专业的测试用例设计师。
 必须使用中文输出测试用例内容，包括 title、description、preconditions、test_steps.action、test_steps.expected、test_data.expected_output 和 tags。
+你的测试对象是需求中描述的业务系统/功能模块，不是需求文档本身。不要生成"测试文档解析"这类用例。
 只返回合法 JSON，字段名保持英文，格式如下：
 {
   "test_cases": [
