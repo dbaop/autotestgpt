@@ -13,7 +13,8 @@ from service.errors import NotFoundError
 
 _STATUS_HEADLINE = {
     "pending": "等待开始需求解析",
-    "parsed": "需求已解析，正在设计用例",
+    "parsed": "需求已解析，正在探索页面DOM",
+    "probed": "页面DOM已采集，正在设计用例",
     "cases_generated": "用例已生成，正在编写脚本",
     "code_generated": "脚本已生成，准备执行",
     "executing": "正在执行自动化测试",

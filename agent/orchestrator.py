@@ -14,6 +14,7 @@ from config import Config
 from models import db, Conversation, Message, Requirement, AgentEvent
 
 from .req_agent import ReqAgent
+from .browser_agent import BrowserAgent
 from .case_agent import CaseAgent
 from .code_agent import CodeAgent
 from .exec_agent import ExecAgent
@@ -24,7 +25,8 @@ logger = logging.getLogger(__name__)
 # Mapping from requirement status to orchestrator phase + agent
 STATUS_TO_PHASE: Dict[str, Tuple[str, str]] = {
     "pending": ("parsing", "req_agent"),
-    "parsed": ("designing_cases", "case_agent"),
+    "parsed": ("exploring", "browser_agent"),
+    "probed": ("designing_cases", "case_agent"),
     "cases_generated": ("generating_code", "code_agent"),
     "code_generated": ("executing", "exec_agent"),
     "executing": ("executing", "exec_agent"),
@@ -36,6 +38,7 @@ STATUS_TO_PHASE: Dict[str, Tuple[str, str]] = {
 # Status transitions when an artifact is produced
 ARTIFACT_STATUS_MAP: Dict[str, str] = {
     "structured_requirement": "parsed",
+    "page_map": "probed",
     "test_cases": "cases_generated",
     "test_scripts": "code_generated",
     "review_findings": "executed",
@@ -57,6 +60,7 @@ class ConversationOrchestrator:
     def __init__(self):
         self._agents: Dict[str, Any] = {
             "req_agent": ReqAgent(),
+            "browser_agent": BrowserAgent(),
             "case_agent": CaseAgent(),
             "code_agent": CodeAgent(),
             "exec_agent": ExecAgent(),
@@ -226,7 +230,7 @@ class ConversationOrchestrator:
         history: List[Dict[str, str]] = []
         for msg in messages:
             role = "assistant" if msg.sender in (
-                "req_agent", "case_agent", "code_agent", "exec_agent",
+                "req_agent", "browser_agent", "case_agent", "code_agent", "exec_agent",
                 "review_agent", "router"
             ) else "user"
             history.append({"role": role, "content": msg.content})
@@ -238,9 +242,14 @@ class ConversationOrchestrator:
         base = f"Current phase: {phase}. "
 
         if requirement:
-            base += f"Requirement status: {requirement.status}. "
+            base += f"Requirement ID: {requirement.id}. Status: {requirement.status}. "
             if requirement.knowledge_base_id:
                 base += f"Knowledge base ID: {requirement.knowledge_base_id}. "
+
+            # 注入已保存的测试环境配置，确保 agent 知道 URL/登录态/凭据
+            env_info = self._get_environment_info(requirement)
+            if env_info:
+                base += env_info
 
         if phase == "parsing":
             base += (
@@ -248,6 +257,15 @@ class ConversationOrchestrator:
                 "Use search_knowledge_base to find relevant documentation. "
                 "If information is insufficient, use ask_user to clarify. "
                 "When you have enough information, produce a structured requirement."
+            )
+        elif phase == "exploring":
+            base += (
+                "Your task is to open the target application in the browser and explore its UI. "
+                "Use browser_navigate to open the test URL. "
+                "Use browser_snapshot to capture real DOM elements with their selectors. "
+                "Click through key flows and document every interactive element. "
+                "Produce a page_map artifact with accurate, real CSS selectors — do NOT guess. "
+                "If the site redirects to a login page, document the login form elements."
             )
         elif phase == "designing_cases":
             base += (
@@ -259,14 +277,16 @@ class ConversationOrchestrator:
         elif phase == "generating_code":
             base += (
                 "Your task is to generate executable test scripts (pytest/Playwright). "
+                "Use get_requirement_environment first to check for saved URLs/credentials. "
                 "Use search_knowledge_base for API specs and selector patterns. "
-                "Ask the user for URLs, credentials, or environment details if needed."
+                "Only ask the user for URLs or credentials if get_requirement_environment returns empty."
             )
         elif phase == "executing":
             base += (
                 "Your task is to execute tests and report results. "
+                "Use get_requirement_environment first to check for saved config. "
                 "Use read_workspace_file to examine generated scripts. "
-                "Ask the user for login credentials or environment config if needed."
+                "Only ask the user for login credentials or environment config if get_requirement_environment returns empty."
             )
         elif phase == "reviewing":
             base += (
@@ -276,6 +296,35 @@ class ConversationOrchestrator:
             )
 
         return base
+
+    # ------------------------------------------------------------------
+    # Environment helpers
+    # ------------------------------------------------------------------
+
+    def _get_environment_info(self, requirement: Requirement) -> str:
+        """Extract saved environment config from the requirement for agent prompts."""
+        progress = requirement.execution_progress or {}
+        structured = requirement.structured_data or {}
+
+        env = {}
+        if isinstance(structured, dict):
+            env.update(structured.get("test_environment") or {})
+        if isinstance(progress, dict):
+            env.update(progress.get("test_environment") or {})
+
+        parts = []
+        if env.get("test_url"):
+            parts.append(f"Test URL: {env['test_url']}")
+        if env.get("login_state"):
+            parts.append(f"Login state: {env['login_state']}")
+        if env.get("credential_ref"):
+            parts.append(f"Credential: {env['credential_ref']}")
+        if env.get("allow_explore") is not None:
+            parts.append(f"Allow explore: {env['allow_explore']}")
+
+        if parts:
+            return "Environment config: " + "; ".join(parts) + ". "
+        return ""
 
     # ------------------------------------------------------------------
     # Agent lifecycle
@@ -298,8 +347,9 @@ class ConversationOrchestrator:
 
         # Add a synthetic prompt to kick off the next agent
         prompt_map = {
-            "case_agent": "Please design test cases based on the structured requirement above.",
-            "code_agent": "Please generate test scripts based on the test cases above.",
+            "browser_agent": "Please explore the target application and produce a complete page map with real CSS selectors.",
+            "case_agent": "Please design test cases based on the structured requirement and page map above.",
+            "code_agent": "Please generate test scripts based on the test cases above. Use the page map selectors for Playwright locators — do NOT guess selectors.",
             "exec_agent": "Please execute the generated test scripts and report results.",
             "review_agent": "Please review the code changes.",
         }

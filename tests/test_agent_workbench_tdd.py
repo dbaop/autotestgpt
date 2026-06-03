@@ -188,8 +188,8 @@ def test_agent_workbench_marks_current_agent_as_running():
 
         requirement = Requirement(
             title="待设计用例",
-            description="需求已解析，等待用例设计。",
-            raw_text="需求已解析，等待用例设计。",
+            description="需求已解析，BrowserAgent 正在探索页面DOM。",
+            raw_text="需求已解析，等待页面探索。",
             structured_data={"title": "待设计用例"},
             status="parsed",
         )
@@ -201,5 +201,7 @@ def test_agent_workbench_marks_current_agent_as_running():
     assert response.status_code == 200
     agents = {agent["id"]: agent for agent in response.get_json()["items"][0]["agents"]}
     assert agents["req_agent"]["status"] == "done"
-    assert agents["case_agent"]["status"] == "running"
+    # parsed → browser_agent 先探索页面，case_agent 等 probed 后才启动
+    assert agents["browser_agent"]["status"] == "running", f"browser_agent should be running, got {agents['browser_agent']['status']}"
+    assert agents["case_agent"]["status"] == "queued"
     assert agents["code_agent"]["status"] == "queued"

@@ -101,13 +101,34 @@ class ExecAgent(ToolCapableAgent):
         conversation_messages: List[Dict[str, str]],
         system_instruction: str,
     ) -> Generator[Dict[str, Any], Optional[str], None]:
-        """Interactive test execution with file reading and user questions."""
+        """Interactive test execution with file reading, CDP probing, and self-healing."""
         tools_prompt = format_tools_prompt(self._tools)
         full_system = (
-            "You are a test execution engineer. Execute test scripts and report results.\n\n"
+            "You are a test execution engineer with browser CDP access for self-healing.\n\n"
+            "## Your workflow\n"
+            "1. Read the test scripts with read_workspace_file.\n"
+            "2. Execute them and collect results.\n"
+            "3. If a test FAILS with a selector/locator error (e.g. 'selector not found', "
+            "'element not visible', 'no such element'):\n"
+            "   a. Use browser_navigate to open the same URL the test was targeting.\n"
+            "   b. Use browser_snapshot to capture the current DOM.\n"
+            "   c. Compare the failed selector with the actual DOM elements.\n"
+            "   d. Find the correct selector from the snapshot and report the fix.\n"
+            "4. If the page looks different from what the test expects, take a browser_screenshot.\n"
+            "5. Produce a **script_fix** artifact with the corrected selectors.\n\n"
             + tools_prompt
         )
         yield from super().act(conversation_messages, full_system)
+
+    def _try_extract_artifact(self, response: str) -> Optional[Dict[str, Any]]:
+        """Extract a script_fix artifact from the agent response (self-healing)."""
+        try:
+            data = self.parse_json_response(response)
+            if isinstance(data, dict) and ("fixed_selectors" in data or "fixed_script" in data):
+                return {"key": "script_fix", "data": data}
+        except Exception:
+            pass
+        return None
 
     def execute_script(self, script_content: str, file_path: Optional[str] = None,
                        script_type: str = 'python', script_id: str = None) -> Dict[str, Any]:

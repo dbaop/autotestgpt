@@ -214,6 +214,13 @@ def resume_flow(requirement_id: int):
     flow = AutoTestFlow()
     flow_data = {"demand": requirement.raw_text, "requirement_id": requirement_id, "project_id": requirement.project_id or 1}
 
+    # 带上已保存的测试环境配置，确保 resume 后 agent 能拿到 URL/登录态/凭据
+    progress = requirement.execution_progress or {}
+    structured = requirement.structured_data or {}
+    test_environment = progress.get("test_environment") or structured.get("test_environment")
+    if test_environment:
+        flow_data["test_environment"] = test_environment
+
     if current_status == "error":
         existing_cases = TestCase.query.filter_by(requirement_id=requirement_id).all()
         case_ids = [c.id for c in existing_cases]

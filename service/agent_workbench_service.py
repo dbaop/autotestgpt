@@ -33,6 +33,7 @@ AGENT_DEFS = [
 STATUS_ORDER = [
     "pending",
     "parsed",
+    "probed",
     "cases_generated",
     "code_generated",
     "executing",
@@ -113,16 +114,19 @@ def _agent_status_map(status: str) -> dict[str, str]:
     done = {key: "done" for key in queued}
     templates: dict[str, dict[str, str]] = {
         "pending": {**queued, "req_agent": "running"},
-        "parsed": {**queued, "req_agent": "done", "case_agent": "running"},
+        "parsed": {**queued, "req_agent": "done", "browser_agent": "running"},
+        "probed": {**queued, "req_agent": "done", "browser_agent": "done", "case_agent": "running"},
         "cases_generated": {
             **queued,
             "req_agent": "done",
+            "browser_agent": "done",
             "case_agent": "done",
             "code_agent": "running",
         },
         "code_generated": {
             **queued,
             "req_agent": "done",
+            "browser_agent": "done",
             "case_agent": "done",
             "code_agent": "done",
             "exec_agent": "running",
@@ -130,6 +134,7 @@ def _agent_status_map(status: str) -> dict[str, str]:
         "executing": {
             **queued,
             "req_agent": "done",
+            "browser_agent": "done",
             "case_agent": "done",
             "code_agent": "done",
             "exec_agent": "running",
@@ -138,6 +143,7 @@ def _agent_status_map(status: str) -> dict[str, str]:
         "executed": {
             **queued,
             "req_agent": "done",
+            "browser_agent": "done",
             "case_agent": "done",
             "code_agent": "done",
             "exec_agent": "done",
@@ -188,7 +194,7 @@ def _build_agents(requirement: Requirement, artifacts: dict[str, int]) -> list[d
     env = _merge_environment(requirement)
     if env.get("test_url") and requirement.status not in ("pending",):
         status_map["browser_agent"] = (
-            "done" if requirement.status in ("parsed", "cases_generated", "code_generated", "executing", "executed", "completed") else status_map["browser_agent"]
+            "done" if requirement.status in ("probed", "cases_generated", "code_generated", "executing", "executed", "completed") else status_map["browser_agent"]
         )
     if requirement.status in ("cases_generated", "code_generated", "executing", "executed", "completed"):
         status_map["case_agent"] = "done"

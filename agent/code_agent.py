@@ -30,10 +30,15 @@ class CodeAgent(ToolCapableAgent):
             )
             self.ui_test_prompt = (
                 "You are a senior UI automation engineer with Playwright expertise. "
-            "Return strict JSON with key `scripts` as a list of script objects."
-        )
+                "You have access to browser_snapshot, browser_navigate, and browser_screenshot tools. "
+                "ALWAYS use real selectors from the page_map artifact. "
+                "If the page_map doesn't cover an element you need, call browser_snapshot to find it. "
+                "Never guess or invent CSS selectors — every selector must be verifiable. "
+                "Return strict JSON with key `scripts` as a list of script objects."
+            )
 
-    def build_prompt(self, test_cases: Dict[str, Any], test_environment: Dict[str, Any] = None) -> str:
+    def build_prompt(self, test_cases: Dict[str, Any], test_environment: Dict[str, Any] = None,
+                     page_map: Dict[str, Any] = None) -> str:
         test_case_list = test_cases.get("test_cases", [])
         if not test_case_list:
             return "Generate one minimal pytest script."
@@ -41,6 +46,9 @@ class CodeAgent(ToolCapableAgent):
         prompt_parts: List[str] = [
             "Generate executable automated test code for the following test cases.",
             "Return JSON with `scripts`.",
+            "CRITICAL: Use ONLY real CSS selectors from the page_map below. "
+            "Do NOT invent or guess selectors. If a needed element is not in the page_map, "
+            "use browser_snapshot to find it first.",
         ]
 
         env = test_environment or {}
@@ -51,6 +59,34 @@ class CodeAgent(ToolCapableAgent):
             prompt_parts.append(f"Login state: {env['login_state']}")
         if env.get("credential_ref"):
             prompt_parts.append(f"Credentials: {env['credential_ref']}")
+
+        # 注入 page_map 中的真实选择器
+        if page_map:
+            prompt_parts.append("\n## Page Map (real DOM selectors — use these EXACTLY)")
+            prompt_parts.append(f"Base URL: {page_map.get('base_url', 'N/A')}")
+            for page in page_map.get("pages", []):
+                prompt_parts.append(f"\n### Page: {page.get('title', '')} ({page.get('route', page.get('url', ''))})")
+                elements = page.get("elements", [])
+                if elements:
+                    prompt_parts.append("| Tag | Selector | Fallback | Type | Label | Purpose |")
+                    prompt_parts.append("|-----|----------|----------|------|-------|---------|")
+                    for el in elements:
+                        selector = el.get("selector", "")
+                        fallback = ", ".join(el.get("fallback_selectors", [])[:2])
+                        prompt_parts.append(
+                            f"| {el.get('tag', '')} | `{selector}` | {fallback} | "
+                            f"{el.get('type', '')} | {el.get('label', el.get('placeholder', ''))} | "
+                            f"{el.get('purpose', '')} |"
+                        )
+                actions = page.get("actions", [])
+                if actions:
+                    prompt_parts.append(f"Actions: {' → '.join(actions)}")
+            flows = page_map.get("flows", [])
+            if flows:
+                prompt_parts.append("\n## Discovered Flows")
+                for flow in flows:
+                    steps = " → ".join(flow.get("steps", []))
+                    prompt_parts.append(f"- **{flow.get('name', '')}**: {steps}")
 
         for i, tc in enumerate(test_case_list, 1):
             prompt_parts.append(f"\n### Test Case {i}")
