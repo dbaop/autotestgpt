@@ -253,97 +253,50 @@ class BrowserProbe:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def extract_content(self) -> Dict[str, Any]:
+    def extract_content(self, max_chars: int = 50000) -> Dict[str, Any]:
         """Extract the main text content from the current page as markdown.
 
-        Handles online doc platforms (DingTalk, Feishu, Yuque, Notion, Google Docs)
-        by targeting their content containers, then falls back to extracting all
-        visible text from <body>.
+        Uses innerText on the best-matching content container, which naturally
+        strips <script>, <style>, and hidden elements.  Falls back to body.
         """
         if not self.is_connected:
             return {"ok": False, "error": "Browser not connected."}
 
         try:
-            content = self._page.evaluate("""() => {
-                // Platform-specific selectors for doc content
+            content = self._page.evaluate("""(maxChars) => {
                 const platformSelectors = [
-                    // DingTalk / 钉钉文档
                     '[class*="doc-content"]', '[class*="document-content"]',
                     '[class*="ak-content"]', '[class*="editor-content"]',
                     '.dingtalk-doc-content', '[data-testid="doc-body"]',
-                    // Feishu / 飞书文档
                     '[class*="docx-content"]', '[class*="lark-doc"]',
                     '.block-content', '[data-zone-id="page-content"]',
-                    // Yuque / 语雀
-                    '.yuque-doc-content', '[class*="lake-content"]',
-                    '.ne-viewer-body',
-                    // Notion
+                    '.yuque-doc-content', '[class*="lake-content"]', '.ne-viewer-body',
                     '.notion-page-content', '[class*="notion-page"]',
-                    // Google Docs
                     '.kix-page-content', '#docs-editor',
-                    // Generic fallbacks
-                    'article', 'main', '[role="main"]', '.content', '.markdown-body',
+                    'article', 'main', '[role="main"]', '.markdown-body',
                     '.prose', '#content', '.post-content', '.article-content',
                 ];
 
                 let container = null;
                 for (const sel of platformSelectors) {
-                    container = document.querySelector(sel);
-                    if (container && container.textContent.trim().length > 100) break;
+                    const el = document.querySelector(sel);
+                    if (el && el.innerText.trim().length > 100) { container = el; break; }
                 }
-
-                // Fallback to body
-                if (!container || container.textContent.trim().length < 50) {
+                if (!container || container.innerText.trim().length < 50) {
                     container = document.body;
                 }
 
-                // Extract headings and paragraphs
-                const parts = [];
-                const walker = document.createTreeWalker(
-                    container,
-                    NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-                    {
-                        acceptNode: function(node) {
-                            if (node.nodeType === 3) { // text node
-                                const txt = node.textContent.trim();
-                                return txt.length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-                            }
-                            const tag = node.tagName;
-                            if (tag && /^H[1-6]$/.test(tag)) return NodeFilter.FILTER_ACCEPT;
-                            if (tag === 'P' || tag === 'LI' || tag === 'TD' || tag === 'TH') return NodeFilter.FILTER_ACCEPT;
-                            if (tag === 'BLOCKQUOTE' || tag === 'PRE' || tag === 'CODE') return NodeFilter.FILTER_ACCEPT;
-                            return NodeFilter.FILTER_SKIP;
-                        }
-                    }
-                );
-
-                let node;
-                while (node = walker.nextNode()) {
-                    if (node.nodeType === 3) {
-                        const txt = node.textContent.trim();
-                        if (txt) parts.push(txt);
-                    } else {
-                        const tag = node.tagName;
-                        const text = node.textContent.trim();
-                        if (!text) continue;
-                        if (tag === 'H1') parts.push('\\n# ' + text + '\\n');
-                        else if (tag === 'H2') parts.push('\\n## ' + text + '\\n');
-                        else if (tag === 'H3') parts.push('\\n### ' + text + '\\n');
-                        else if (tag === 'H4') parts.push('\\n#### ' + text + '\\n');
-                        else if (tag === 'LI') parts.push('- ' + text);
-                        else if (tag === 'BLOCKQUOTE') parts.push('> ' + text);
-                        else if (tag === 'PRE' || tag === 'CODE') parts.push('```\\n' + text + '\\n```');
-                        else parts.push(text);
-                    }
-                }
+                // innerText strips script/style/hidden elements automatically
+                const raw = container.innerText;
+                const text = raw.length > maxChars ? raw.slice(0, maxChars) + '...(truncated)' : raw;
 
                 return {
                     title: document.title,
                     url: window.location.href,
-                    content: parts.join('\\n'),
-                    length: parts.join('\\n').length,
+                    content: text,
+                    length: text.length,
                 };
-            }""")
+            }""", max_chars)
 
             return {
                 "ok": True,

@@ -2,10 +2,13 @@
 Flow application service.
 """
 
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from agent.exec_agent import ExecAgent
 from flow.test_flow import AutoTestFlow
