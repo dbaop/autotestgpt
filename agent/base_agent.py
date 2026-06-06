@@ -19,6 +19,13 @@ _MODEL_PRIORITY = [
     ('OPENAI_API_KEY', 'gpt-4', None),
 ]
 
+# 视觉模型配置（豆包 doubao-seed-1-6-vision，火山引擎 ARK）
+_VISION_MODEL_CONFIG = {
+    'api_key_attr': 'DOUBAO_API_KEY',
+    'model': 'openai/doubao-seed-1-6-vision-250815',
+    'api_base': 'https://ark.cn-beijing.volces.com/api/v3',
+}
+
 
 def _resolve_llm_config():
     """按优先级解析可用的 LLM 配置"""
@@ -27,6 +34,14 @@ def _resolve_llm_config():
         if api_key:
             return model, api_key, base
     return 'deepseek/deepseek-chat', None, None
+
+
+def _resolve_vision_config():
+    """解析视觉模型配置（豆包 doubao-seed-1-6-vision）"""
+    api_key = getattr(Config, _VISION_MODEL_CONFIG['api_key_attr'], None)
+    if api_key:
+        return _VISION_MODEL_CONFIG['model'], api_key, _VISION_MODEL_CONFIG['api_base']
+    return None, None, None
 
 
 def load_agent_config(agent_type: str) -> dict | None:
@@ -144,6 +159,86 @@ class BaseAgent(ABC):
         except Exception as e:
             logger.error(f"LLM流式调用失败: {e}")
             yield f"\n[LLM error: {e}]"
+
+    def call_vision_llm(
+        self,
+        prompt: str,
+        image_urls: Optional[List[str]] = None,
+        image_bases: Optional[List[str]] = None,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """调用视觉模型（豆包 doubao-seed-1-6-vision），支持图片识别。
+
+        Args:
+            prompt: 文本提示
+            image_urls: 图片 URL 列表（HTTP/HTTPS 链接）
+            image_bases: base64 编码的图片列表
+            system_prompt: 系统提示（可选）
+            temperature: 温度参数（可选，默认使用实例的 temperature）
+            max_tokens: 最大 token 数（可选，默认 4000）
+
+        Returns:
+            模型返回的文本内容
+        """
+        try:
+            resolved_model, api_key, api_base = _resolve_vision_config()
+            if not api_key:
+                raise ValueError("未配置 DOUBAO_API_KEY，无法使用视觉模型")
+
+            # 构建多模态消息内容
+            content_parts = []
+
+            # 添加图片（支持 URL 和 base64）
+            if image_urls:
+                for url in image_urls:
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": url},
+                    })
+
+            if image_bases:
+                for b64_img in image_bases:
+                    # 如果未带前缀，自动添加 data:image/png;base64,
+                    if not b64_img.startswith("data:"):
+                        b64_img = f"data:image/png;base64,{b64_img}"
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": b64_img},
+                    })
+
+            if not content_parts:
+                raise ValueError("至少需要提供一个图片 URL 或 base64 图片数据")
+
+            # 添加文本提示
+            content_parts.append({"type": "text", "text": prompt})
+
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": content_parts})
+
+            kwargs = dict(
+                model=resolved_model,
+                messages=messages,
+                temperature=temperature if temperature is not None else self.temperature,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+                api_key=api_key,
+                api_base=api_base,
+            )
+
+            response = litellm.completion(**kwargs)
+            content = response.choices[0].message.content
+            logger.info(
+                f"视觉模型调用成功，模型: {resolved_model}, "
+                f"图片数量: {len(content_parts) - 1}, 响应长度: {len(content)}"
+            )
+            return content
+
+        except Exception as e:
+            logger.error(f"视觉模型调用失败: {e}")
+            raise
 
     def parse_json_response(self, response: str) -> Dict[str, Any]:
         """从 LLM 响应中提取 JSON（正确处理嵌套对象）"""

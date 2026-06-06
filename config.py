@@ -14,6 +14,9 @@ class Config:
     MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY", "")
     DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    DOUBAO_API_KEY = os.getenv("DOUBAO_API_KEY", "")
+    DOUBAO_API_BASE = os.getenv("DOUBAO_API_BASE", "https://ark.cn-beijing.volces.com/api/v3")
+    DOUBAO_VISION_MODEL = os.getenv("DOUBAO_VISION_MODEL", "doubao-seed-1-6-vision-250815")
     SERVER_PORT = int(os.getenv("SERVER_PORT", 8000))
     WORKSPACE = "./workspace"
     REPORT_DIR = "./report"
