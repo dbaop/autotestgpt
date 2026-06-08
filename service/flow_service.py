@@ -152,6 +152,17 @@ def start_flow(data: dict):
     structured_seed: dict = {"test_environment": test_environment}
     original_document = None
 
+    # 持久化前端预设的代码 review 配置（orchestrator 模式下的确认 gate 与收尾会读取）
+    review_config = data.get("review") or data.get("review_config")
+    if review_config:
+        structured_seed["review"] = {
+            "enabled": True,
+            "repo_url": review_config.get("repo_url", ""),
+            "repo_path": review_config.get("repo_path", ""),
+            "branch": review_config.get("branch", "main"),
+            "days": int(review_config.get("days") or 7),
+        }
+
     # 如果提供了文档 URL（钉钉/飞书/语雀等），通过 CDP 自动提取内容
     if doc_url and not demand:
         extracted = _extract_doc_from_url(doc_url)

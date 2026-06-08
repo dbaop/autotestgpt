@@ -34,7 +34,22 @@ class CodeAgent(ToolCapableAgent):
                 "ALWAYS use real selectors from the page_map artifact. "
                 "If the page_map doesn't cover an element you need, call browser_snapshot to find it. "
                 "Never guess or invent CSS selectors — every selector must be verifiable. "
-                "Return strict JSON with key `scripts` as a list of script objects."
+                "Return strict JSON with key `scripts` as a list of script objects.\n\n"
+                "For EVERY UI test case, each script object MUST include BOTH:\n"
+                "  1. `code`: a Playwright Python script (deliverable, for archival/manual reuse).\n"
+                "  2. `dsl`: a Given-When-Then JSON object executed in a real browser via CDP. Shape:\n"
+                "     {\n"
+                '       "given": {"action": "navigate", "url": "/login or full URL"},\n'
+                '       "when": [ {"action": "fill|click|select|wait", "selector": "<real css>", "value": "<for fill/select>"} ],\n'
+                '       "then": [ {"type": "url_contains", "value": "/dashboard"},\n'
+                '                 {"type": "element_visible", "selector": "<css>"},\n'
+                '                 {"type": "element_text", "selector": "<css>", "contains": "<text>"},\n'
+                '                 {"type": "element_count", "selector": "<css>", "min": 1} ]\n'
+                "     }\n"
+                "  - `when.action` ∈ navigate|fill|click|select|wait. `then.type` ∈ "
+                "url_contains|element_visible|element_text|element_count.\n"
+                "  - Every selector MUST come from the page_map (real DOM). `given.url` may be relative "
+                "(it is resolved against the test URL). Include at least one `then` assertion."
             )
 
     def build_prompt(self, test_cases: Dict[str, Any], test_environment: Dict[str, Any] = None,
@@ -195,19 +210,21 @@ class CodeAgent(ToolCapableAgent):
                 code = "\n".join(str(line) for line in code)
             code = self._fix_code_newlines(str(code))
 
-            normalized.append(
-                {
-                    "id": script_id,
-                    "title": script.get("title", f"Auto script {script_id}"),
-                    "description": script.get("description", ""),
-                    "language": language,
-                    "framework": framework,
-                    "code": code,
-                    "dependencies": script.get("dependencies", ["pytest"]),
-                    "execution_command": script.get("execution_command", "pytest -q"),
-                    "expected_output": script.get("expected_output", "tests pass"),
-                }
-            )
+            entry = {
+                "id": script_id,
+                "title": script.get("title", f"Auto script {script_id}"),
+                "description": script.get("description", ""),
+                "language": language,
+                "framework": framework,
+                "code": code,
+                "dependencies": script.get("dependencies", ["pytest"]),
+                "execution_command": script.get("execution_command", "pytest -q"),
+                "expected_output": script.get("expected_output", "tests pass"),
+            }
+            # Preserve the Given-When-Then DSL for CDP execution (UI cases)
+            if isinstance(script.get("dsl"), dict):
+                entry["dsl"] = script["dsl"]
+            normalized.append(entry)
 
         if not normalized:
             normalized.append(

@@ -33,9 +33,15 @@ const isVisibleMessage = (msg: Message) =>
   !msg.metadata?.hidden && !msg.content.startsWith('[系统提示]')
 
 const PHASE_LABELS: Record<string, string> = {
-  idle: '空闲', clarifying: '等待确认', parsing: '解析需求',
-  designing_cases: '设计用例', generating_code: '生成脚本',
-  executing: '执行测试', reviewing: '代码审查', completed: '完成',
+  idle: '空闲', clarifying: '等待确认', confirming: '等待确认', parsing: '解析需求',
+  exploring: '探索页面', designing_cases: '设计用例', generating_code: '生成脚本',
+  executing: '执行测试', reviewing: '代码审查', finalizing: '生成报告', completed: '完成',
+}
+
+// 从消息内容中解析报告预览链接（finalize 阶段 router 消息携带）
+const extractReportUrl = (content: string): string | null => {
+  const m = content.match(/\/api\/reports\/\d+\/preview/)
+  return m ? m[0] : null
 }
 
 export default function Chat() {
@@ -532,6 +538,18 @@ export default function Chat() {
                         <pre style={{ margin: 0, fontFamily: C.mono, fontSize: 12, color: C.text, whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
                           {msg.content}
                         </pre>
+                        {!isUser && extractReportUrl(msg.content) && (
+                          <button
+                            onClick={() => window.open(extractReportUrl(msg.content)!, '_blank')}
+                            style={{
+                              marginTop: 10, padding: '8px 16px', borderRadius: 10, cursor: 'pointer',
+                              fontFamily: C.mono, fontSize: 11, fontWeight: 700, color: '#fff',
+                              background: 'var(--accent-violet)', border: 'none',
+                            }}
+                          >
+                            📄 查看测试报告
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>

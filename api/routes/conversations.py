@@ -235,21 +235,19 @@ def send_message(conv_id):
 
         # Orchestrator mode — push events via SSE, return 202
         if isinstance(result, dict) and result.get("_orchestrator_mode"):
-            from service.sse_service import push_sse_event, broadcast_error
-            import threading
+            # 复用 flow_service 的带 app context 的执行通道，确保 orchestrator 内的
+            # DB 操作（落库 / 确认 gate / 确定性执行）拥有 Flask app context。
+            from agent.orchestrator import process_user_message_flow
+            from service.flow_service import _executor, _run_orchestrator_in_thread
 
-            def _run_orchestrator():
-                from agent.orchestrator import process_user_message_flow
-                from flask import copy_current_request_context
+            content = data['content']
 
-                try:
-                    for event in process_user_message_flow(conv_id, data['content']):
-                        push_sse_event(conv_id, event)
-                except Exception as exc:
-                    broadcast_error(conv_id, str(exc))
+            def _fn():
+                return process_user_message_flow(conv_id, content)
 
-            thread = threading.Thread(target=_run_orchestrator, daemon=True)
-            thread.start()
+            _executor.submit(
+                _run_orchestrator_in_thread, _fn, conv_id, conversation.requirement_id
+            )
 
             return jsonify({
                 'message': '已接收，Agent 正在处理...',

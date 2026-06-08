@@ -6,6 +6,7 @@ with a unified conversation-driven workflow where agents can ask questions,
 search the knowledge base, and produce artifacts through multi-turn dialogue.
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Generator, List, Optional, Tuple
@@ -20,17 +21,25 @@ from .code_agent import CodeAgent
 from .exec_agent import ExecAgent
 from .review_agent import ReviewAgent
 
+
+def _now():
+    return datetime.now(timezone.utc)
+
 logger = logging.getLogger(__name__)
 
-# Mapping from requirement status to orchestrator phase + agent
+# Mapping from requirement status to orchestrator phase + agent.
+# 注意：部分状态由 _drive 特判处理（不再选 LLM agent）：
+#   - parsed      → 进入结构化确认 gate（确认后改走 exploring/browser_agent）
+#   - code_generated / executing → 确定性执行 _run_execution
+#   - executed    → 收尾 _finalize_with_report
 STATUS_TO_PHASE: Dict[str, Tuple[str, str]] = {
     "pending": ("parsing", "req_agent"),
-    "parsed": ("exploring", "browser_agent"),
+    "parsed": ("confirming", ""),
     "probed": ("designing_cases", "case_agent"),
     "cases_generated": ("generating_code", "code_agent"),
-    "code_generated": ("executing", "exec_agent"),
-    "executing": ("executing", "exec_agent"),
-    "executed": ("completed", ""),
+    "code_generated": ("executing", ""),
+    "executing": ("executing", ""),
+    "executed": ("finalizing", ""),
     "completed": ("completed", ""),
     "error": ("idle", ""),
 }
@@ -41,8 +50,10 @@ ARTIFACT_STATUS_MAP: Dict[str, str] = {
     "page_map": "probed",
     "test_cases": "cases_generated",
     "test_scripts": "code_generated",
-    "review_findings": "executed",
 }
+
+# 驱动循环防失控上限（execution 作为单步不会快速累加）
+MAX_DRIVE_STEPS = 16
 
 
 class ConversationOrchestrator:
@@ -104,101 +115,575 @@ class ConversationOrchestrator:
         requirement_id = conversation.requirement_id
         requirement = db.session.get(Requirement, requirement_id) if requirement_id else None
 
-        # Detect and save environment config from chat messages
-        env_saved = self._try_save_env_from_message(requirement, user_message, conversation_id)
-        if env_saved:
-            # Confirm the env update and stop — let user trigger next action
-            confirm_msg = Message(
-                conversation_id=conversation_id,
-                sender="router",
-                content=(
-                    f"已记录环境配置 ({env_saved})。\n\n"
-                    f"需求状态: **{requirement.status if requirement else 'pending'}**。"
-                    f"你可以输入消息开始需求解析，比如发一条「分析需求」或「开始」，"
-                    f"我会自动提取文档内容、设计用例、生成脚本并执行测试。"
-                ),
-                agent_type="router",
-                extra_data={"source": "env_setup_detected", "saved": env_saved},
-            )
-            db.session.add(confirm_msg)
-            db.session.commit()
-            yield {"type": "message", "complete": True, "content": confirm_msg.content}
-            yield {"type": "done"}
+        # ---- Gate 回复：解析确认信息（环境/账号/是否 review）并继续驱动 ----
+        if (
+            requirement
+            and requirement.status == "parsed"
+            and self._gate_emitted(requirement)
+            and not self._confirmation_done(requirement)
+        ):
+            self._parse_confirmation_reply(requirement, user_message, conversation_id)
+            self._clear_waiting(requirement_id)
+            yield from self._drive(conversation_id, requirement)
             return
 
-        # Check if resuming from a waiting_user state
-        if requirement and requirement_id in self._active_generators:
-            # Resume the active agent with user's response
-            yield from self._resume_agent(requirement_id, user_message)
-            return
-
-        # Determine phase and agent
-        phase, agent_type = self._determine_phase(requirement_id, user_message)
-
-        if agent_type and agent_type in self._agents:
-            agent = self._agents[agent_type]
-        else:
-            agent = self._agents["req_agent"]
-
-        # Build conversation context
-        history = self._load_conversation_history(conversation_id)
-        system_instruction = self._build_system_instruction(phase, requirement)
-
-        # Run the agent
-        yield {"type": "phase_change", "from": "idle", "to": phase, "agent": agent_type}
-
-        agent_gen = agent.act(history, system_instruction)
-        self._active_generators[requirement_id or 0] = agent_gen
-
-        for event in agent_gen:
-            # Save agent messages to DB
-            if event.get("type") == "message" and event.get("complete"):
-                self._save_agent_message(
-                    conversation_id, agent_type, event["content"]
+        # ---- pending 阶段：先记录环境配置（若有），提示用户开始 ----
+        if requirement is None or requirement.status == "pending":
+            env_saved = self._try_save_env_from_message(requirement, user_message, conversation_id)
+            if env_saved:
+                confirm_msg = Message(
+                    conversation_id=conversation_id,
+                    sender="router",
+                    content=(
+                        f"已记录环境配置 ({env_saved})。\n\n"
+                        f"需求状态: **{requirement.status if requirement else 'pending'}**。"
+                        f"你可以输入消息开始需求解析，比如发一条「分析需求」或「开始」，"
+                        f"我会自动提取文档内容、设计用例、生成脚本并执行测试。"
+                    ),
+                    agent_type="router",
+                    extra_data={"source": "env_setup_detected", "saved": env_saved},
                 )
-
-            # Handle question → pause
-            if event.get("type") == "question":
-                self._handle_question(
-                    requirement,
-                    phase,
-                    agent_type,
-                    history,
-                    event,
-                )
-                # Don't advance — wait for user response
-                yield event
+                db.session.add(confirm_msg)
+                db.session.commit()
+                yield {"type": "message", "complete": True, "content": confirm_msg.content}
                 yield {"type": "done"}
                 return
 
-            # Handle artifact → persist + advance
-            if event.get("type") == "artifact":
-                self._handle_artifact(
-                    requirement,
-                    event["key"],
-                    event["data"],
-                    conversation_id,
-                )
-                yield event
+        # ---- 处于等待用户的中间态（agent 提问）：清除等待并重新驱动 ----
+        # 说明：ask_user 后 agent generator 已结束，无法 send() 续跑；改为按当前
+        # status + 含用户答复的 history 重新驱动（agent 会带着答复重跑该阶段）。
+        if requirement and self._is_waiting(requirement):
+            self._clear_waiting(requirement_id)
+            yield from self._drive(conversation_id, requirement)
+            return
 
-            yield event
+        # ---- 首次/常规：跑当前阶段的 agent，再交给 _drive 驱动到底 ----
+        phase, agent_type = self._determine_phase(requirement_id, user_message)
 
-        # Agent done — clean up
-        self._active_generators.pop(requirement_id or 0, None)
-        conversation.updated_at = datetime.now(timezone.utc)
-        db.session.commit()
+        if agent_type and agent_type in self._agents:
+            yield {"type": "phase_change", "from": "idle", "to": phase, "agent": agent_type}
+            paused = yield from self._run_agent_step(
+                conversation_id, requirement, phase, agent_type, user_kickoff=True
+            )
+            conversation.updated_at = _now()
+            db.session.commit()
+            if paused:
+                yield {"type": "done"}
+                return
 
-        # Auto-advance if there's a next phase
-        if requirement and not self._is_waiting(requirement):
-            next_phase, next_agent = self._determine_next_phase(requirement)
-            if next_agent and next_agent in self._agents:
-                yield {"type": "phase_change", "from": phase, "to": next_phase, "agent": next_agent}
-                # Recursively invoke next agent (but don't block for user)
-                yield from self._auto_run_agent(
-                    conversation_id, requirement, next_phase, next_agent
-                )
+        if requirement:
+            yield from self._drive(conversation_id, requirement)
+        else:
+            yield {"type": "done"}
+
+    # ------------------------------------------------------------------
+    # Drive-to-completion loop
+    # ------------------------------------------------------------------
+
+    def _drive(
+        self, conversation_id: int, requirement: Optional[Requirement]
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Drive the workflow forward through phases until paused or terminal.
+
+        Pauses (returns without 'done' replacement) when an agent asks a
+        question or a confirmation gate is emitted. Reaches a terminal state at
+        'completed'/'error'. Guards against infinite loops.
+        """
+        if not requirement:
+            yield {"type": "done"}
+            return
+
+        guard = 0
+        while True:
+            guard += 1
+            if guard > MAX_DRIVE_STEPS:
+                yield {"type": "error", "message": "流程驱动达到步数上限，已停止"}
+                break
+
+            db.session.refresh(requirement)
+            status = requirement.status
+
+            # Terminal
+            if status in ("completed", "error"):
+                break
+
+            # Paused waiting for user (re-entrancy guard)
+            if self._is_waiting(requirement):
+                return
+
+            # Confirmation gate after requirement parsing
+            if status == "parsed" and not self._confirmation_done(requirement):
+                yield from self._emit_confirmation_gate(conversation_id, requirement)
+                return
+
+            # Deterministic test execution
+            if status in ("code_generated", "executing"):
+                yield from self._run_execution(conversation_id, requirement)
+                continue
+
+            # Finalize: (optional) review + report
+            if status == "executed":
+                yield from self._finalize_with_report(conversation_id, requirement)
+                continue
+
+            # Select the agent for this phase
+            if status == "parsed" and self._confirmation_done(requirement):
+                phase, agent_type = ("exploring", "browser_agent")
+            else:
+                phase, agent_type = STATUS_TO_PHASE.get(status, ("", ""))
+
+            if not agent_type or agent_type not in self._agents:
+                break
+
+            # Skip UI exploration when there's no URL / no UI scope
+            if agent_type == "browser_agent" and not self._needs_exploration(requirement):
+                self._skip_phase_to(requirement, "probed")
+                continue
+
+            yield {"type": "phase_change", "from": status, "to": phase, "agent": agent_type}
+            prev_status = status
+            paused = yield from self._run_agent_step(
+                conversation_id, requirement, phase, agent_type
+            )
+            if paused:
+                yield {"type": "done"}
+                return
+
+            db.session.refresh(requirement)
+            if requirement.status == prev_status:
+                # Agent produced no advancing artifact — stop to avoid a loop
+                msg = "流程未能自动推进（未生成预期结果），请补充信息后再继续。"
+                self._save_agent_message(conversation_id, "router", msg)
+                yield {"type": "message", "complete": True, "content": msg}
+                break
 
         yield {"type": "done"}
+
+    def _run_agent_step(
+        self,
+        conversation_id: int,
+        requirement: Optional[Requirement],
+        phase: str,
+        agent_type: str,
+        user_kickoff: bool = False,
+    ) -> Generator[Dict[str, Any], None, bool]:
+        """Run a single agent phase. Returns True if it paused on a question."""
+        agent = self._agents.get(agent_type)
+        if not agent:
+            return False
+
+        history = self._load_conversation_history(conversation_id)
+        if not user_kickoff:
+            synthetic_prompt = self._AUTO_PROMPTS.get(
+                agent_type, "Please proceed with your task."
+            )
+            history.append({"role": "user", "content": synthetic_prompt})
+
+        system_instruction = self._build_system_instruction(phase, requirement)
+        req_key = requirement.id if requirement else 0
+
+        agent_gen = agent.act(history, system_instruction)
+        self._active_generators[req_key] = agent_gen
+
+        paused = False
+        for event in agent_gen:
+            etype = event.get("type")
+            if etype == "message" and event.get("complete"):
+                self._save_agent_message(conversation_id, agent_type, event["content"])
+                yield event
+                continue
+            if etype == "question":
+                self._handle_question(requirement, phase, agent_type, history, event)
+                yield event
+                paused = True
+                break
+            if etype == "artifact":
+                self._handle_artifact(
+                    requirement, event["key"], event["data"], conversation_id
+                )
+                yield event
+                continue
+            yield event
+
+        self._active_generators.pop(req_key, None)
+        return paused
+
+    _AUTO_PROMPTS: Dict[str, str] = {
+        "browser_agent": "Please explore the target application and produce a complete page map with real CSS selectors.",
+        "case_agent": "Please design test cases based on the structured requirement and page map above.",
+        "code_agent": "Please generate test scripts based on the test cases above. Use the page map selectors for Playwright locators — do NOT guess selectors.",
+        "req_agent": "Please analyze the requirement and produce a structured requirement.",
+    }
+
+    def _needs_exploration(self, requirement: Requirement) -> bool:
+        """Whether to run the browser_agent UI exploration step."""
+        env = self._collect_env(requirement)
+        if env.get("test_url"):
+            return True
+        structured = requirement.structured_data or {}
+        if isinstance(structured, dict):
+            if structured.get("ui_elements"):
+                return True
+            sr = structured.get("structured_requirement") or {}
+            if isinstance(sr, dict) and sr.get("ui_elements"):
+                return True
+        return False
+
+    def _skip_phase_to(self, requirement: Requirement, status: str):
+        from flow.test_flow import FlowDataAccess
+
+        FlowDataAccess.update_requirement(requirement.id, status=status)
+
+    def _save_ui_dsl_scripts(self, requirement_id: int, scripts: List[Dict[str, Any]]):
+        """Create an executable ui_cdp TestScript (GWT DSL) for each UI script that
+        carries a `dsl`. Matching mirrors FlowDataAccess.save_scripts (id ∈ case.title,
+        fallback to the first case)."""
+        from models import TestCase, TestScript
+
+        dsl_scripts = [s for s in scripts if isinstance(s.get("dsl"), dict)]
+        if not dsl_scripts:
+            return
+
+        cases = TestCase.query.filter_by(requirement_id=requirement_id).all()
+        if not cases:
+            return
+
+        for script in dsl_scripts:
+            script_id = str(script.get("id", ""))
+            test_case_id = None
+            for case in cases:
+                if case.title and script_id and script_id in case.title:
+                    test_case_id = case.id
+                    break
+            if not test_case_id:
+                test_case_id = cases[0].id
+
+            ts = TestScript(
+                test_case_id=test_case_id,
+                script_type="ui_cdp",
+                script_content=json.dumps(script["dsl"], ensure_ascii=False),
+                file_path=script.get("file_path", ""),
+                status="generated",
+            )
+            db.session.add(ts)
+        db.session.commit()
+        logger.info("Saved %d ui_cdp DSL scripts for req %d", len(dsl_scripts), requirement_id)
+
+    def _collect_env(self, requirement: Requirement) -> Dict[str, Any]:
+        progress = requirement.execution_progress or {}
+        structured = requirement.structured_data or {}
+        env: Dict[str, Any] = {}
+        if isinstance(structured, dict):
+            env.update(structured.get("test_environment") or {})
+        if isinstance(progress, dict):
+            env.update(progress.get("test_environment") or {})
+        return env
+
+    def _clear_waiting(self, requirement_id: Optional[int]):
+        """Clear a waiting_user pause so the workflow can re-drive."""
+        if not requirement_id:
+            return
+        self._active_generators.pop(requirement_id, None)
+        db.session.execute(
+            db.delete(AgentEvent).where(
+                AgentEvent.requirement_id == requirement_id,
+                AgentEvent.event_type == "waiting_user",
+            )
+        )
+        req = db.session.get(Requirement, requirement_id)
+        if req:
+            req.current_phase = ""
+        db.session.commit()
+
+    # ------------------------------------------------------------------
+    # Confirmation gate
+    # ------------------------------------------------------------------
+
+    def _gate_emitted(self, requirement: Requirement) -> bool:
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            return False
+        return bool(structured.get("confirmation", {}).get("emitted"))
+
+    def _confirmation_done(self, requirement: Requirement) -> bool:
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            return False
+        return structured.get("confirmation", {}).get("confirmed") is True
+
+    def _emit_confirmation_gate(
+        self, conversation_id: int, requirement: Requirement
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Ask the user to confirm environment / account / code-review before
+        continuing the automated workflow."""
+        from sqlalchemy.orm.attributes import flag_modified
+
+        env = self._collect_env(requirement)
+        structured = requirement.structured_data or {}
+        review = structured.get("review") or {} if isinstance(structured, dict) else {}
+
+        url_line = f"- 测试地址：{env['test_url']}" if env.get("test_url") else "- 测试地址：（未提供，请补充被测系统 URL）"
+        login_line = (
+            f"- 登录/账号：{env.get('login_state')}"
+            + (f"，凭据 {env.get('credential_ref')}" if env.get("credential_ref") else "")
+            if env.get("login_state") or env.get("credential_ref")
+            else "- 登录/账号：（如需登录，请提供登录方式与账号/凭据）"
+        )
+        if review.get("enabled"):
+            target = review.get("repo_url") or review.get("repo_path") or "（未填写仓库）"
+            review_line = f"- 代码 review：已预设开启（{target}，分支 {review.get('branch', 'main')}，近 {review.get('days', 7)} 天）。如不需要请回复「不需要 review」。"
+        else:
+            review_line = "- 代码 review：默认不开启。如需要请回复「需要 review，仓库 <url> 分支 <branch>」。"
+
+        question = (
+            "需求已解析完成 ✅。开始自动生成用例与执行测试前，请确认以下信息"
+            "（可在一条消息里补全/修改，确认无误回复「确认」即可）：\n"
+            f"{url_line}\n{login_line}\n{review_line}"
+        )
+
+        # Mark gate as emitted (so the reply is routed to gate parsing)
+        if not isinstance(structured, dict):
+            structured = {}
+        confirmation = structured.get("confirmation") or {}
+        confirmation["emitted"] = True
+        structured["confirmation"] = confirmation
+        requirement.structured_data = structured
+        flag_modified(requirement, "structured_data")
+        db.session.commit()
+
+        event = {"type": "question", "question": question, "context": "确认后将自动执行：探索页面 → 设计用例 → 生成脚本 → 执行测试 → 出报告。"}
+        self._handle_question(requirement, "clarifying", "router", [], event)
+        self._save_agent_message(conversation_id, "router", question)
+        yield event
+        yield {"type": "done"}
+
+    def _parse_confirmation_reply(
+        self, requirement: Requirement, user_message: str, conversation_id: int
+    ):
+        """Parse the user's gate reply: env config + code-review intent."""
+        import re
+        from sqlalchemy.orm.attributes import flag_modified
+
+        # Environment (test_url / login_state / credential_ref)
+        self._try_save_env_from_message(requirement, user_message, conversation_id)
+
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            structured = {}
+        review = dict(structured.get("review") or {})
+
+        msg = user_message.lower()
+        # Negative intent
+        if re.search(r"(不需要|不用|无需|不做|skip).{0,6}(review|审查|代码审查|评审)", user_message):
+            review["enabled"] = False
+        # Positive intent
+        elif re.search(r"(需要|要|开启|做|进行).{0,6}(review|审查|代码审查|评审)", user_message) or "review" in msg:
+            review["enabled"] = True
+
+        # Optional repo / branch / days from the reply
+        repo_m = re.search(r"(https?://[^\s,，。；;]+\.git[^\s,，。；;]*|https?://[^\s,，。；;]+)", user_message)
+        if repo_m and ("review" in msg or review.get("enabled")):
+            review["repo_url"] = repo_m.group(1).rstrip("/")
+        branch_m = re.search(r"(?:分支|branch)[：:\s]*([A-Za-z0-9._/\-]+)", user_message)
+        if branch_m:
+            review["branch"] = branch_m.group(1)
+        days_m = re.search(r"(?:近|最近)?\s*(\d+)\s*天", user_message)
+        if days_m:
+            review["days"] = int(days_m.group(1))
+
+        if review:
+            structured["review"] = review
+
+        confirmation = structured.get("confirmation") or {}
+        confirmation["confirmed"] = True
+        structured["confirmation"] = confirmation
+        requirement.structured_data = structured
+        flag_modified(requirement, "structured_data")
+        db.session.commit()
+        logger.info("Confirmation parsed for req %d: review=%s", requirement.id, review)
+
+    # ------------------------------------------------------------------
+    # Deterministic execution
+    # ------------------------------------------------------------------
+
+    def _run_execution(
+        self, conversation_id: int, requirement: Requirement
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Run all generated test scripts via ExecAgent.process() (real pytest
+        subprocess) and persist ExecutionRecord rows. Does not use the LLM."""
+        from flow.test_flow import FlowDataAccess
+
+        FlowDataAccess.update_requirement(requirement.id, status="executing")
+        env = FlowDataAccess.load_test_environment(requirement.id)
+        # load_test_environment only reads execution_progress; merge structured too
+        if not env.get("test_url"):
+            env = self._collect_env(requirement)
+
+        all_scripts = FlowDataAccess.get_scripts_for_requirement(requirement.id)
+        # UI cases produce a paired (playwright deliverable, ui_cdp executable).
+        # Skip the Playwright deliverable when its ui_cdp sibling exists.
+        ui_cdp_case_ids = {s.test_case_id for s in all_scripts if s.script_type == "ui_cdp"}
+        scripts = [
+            s for s in all_scripts
+            if not (s.script_type == "playwright" and s.test_case_id in ui_cdp_case_ids)
+        ]
+        if not scripts:
+            FlowDataAccess.update_requirement(requirement.id, status="executed")
+            msg = "没有可执行的测试脚本，跳过执行。"
+            self._save_agent_message(conversation_id, "exec_agent", msg)
+            yield {"type": "message", "complete": True, "content": msg}
+            return
+
+        yield {"type": "phase_change", "from": "code_generated", "to": "executing", "agent": "exec_agent"}
+        exec_agent = self._agents["exec_agent"]
+        total = len(scripts)
+        executed = 0
+
+        for idx, script in enumerate(scripts):
+            is_ui = script.script_type == "ui_cdp"
+            tool_name = "run_ui_dsl" if is_ui else "run_pytest"
+            yield {
+                "type": "tool_call",
+                "name": tool_name,
+                "arguments": {"script_id": script.id, "progress": f"{idx + 1}/{total}"},
+            }
+            FlowDataAccess.update_script_status(script.id, "running")
+            try:
+                if is_ui:
+                    from service.ui_runner_service import run_ui_dsl
+
+                    dsl = json.loads(script.script_content or "{}")
+                    result = run_ui_dsl(
+                        dsl,
+                        base_url=env.get("test_url", ""),
+                        screenshot_prefix=f"ui_{script.id}",
+                    )
+                else:
+                    result = exec_agent.process(
+                        {
+                            "script_id": script.id,
+                            "script_content": script.script_content,
+                            "file_path": script.file_path,
+                            "script_type": script.script_type,
+                            "test_url": env.get("test_url", ""),
+                        }
+                    )
+                status = result.get("status", "unknown")
+                FlowDataAccess.create_execution_record(
+                    test_script_id=script.id,
+                    status=status,
+                    result_data=result.get("result", {}),
+                    error_message=result.get("error"),
+                    execution_time=result.get("execution_time", 0),
+                    report_path=result.get("report_path"),
+                    screenshot_paths=result.get("screenshots", []),
+                    started_at=_now(),
+                    finished_at=_now(),
+                )
+                db.session.commit()  # create_execution_record only add()s
+                FlowDataAccess.update_script_status(
+                    script.id, "executed" if status == "success" else "error"
+                )
+            except Exception as exc:
+                logger.error("Script %s execution failed: %s", script.id, exc)
+                db.session.rollback()
+                FlowDataAccess.create_execution_record(
+                    test_script_id=script.id,
+                    status="error",
+                    error_message=str(exc),
+                    started_at=_now(),
+                    finished_at=_now(),
+                )
+                db.session.commit()
+                FlowDataAccess.update_script_status(script.id, "error")
+                status = "error"
+            executed += 1
+            yield {
+                "type": "tool_result",
+                "name": tool_name,
+                "result": {"script_id": script.id, "status": status, "progress": f"{executed}/{total}"},
+            }
+
+        FlowDataAccess.update_requirement(requirement.id, status="executed")
+        FlowDataAccess.set_execution_progress(
+            requirement.id,
+            {"total": total, "executed": executed, "completed": True, "end_time": _now().isoformat()},
+        )
+        summary = f"测试执行完成：共 {total} 个脚本。"
+        self._save_agent_message(conversation_id, "exec_agent", summary)
+        yield {"type": "message", "complete": True, "content": summary}
+
+    # ------------------------------------------------------------------
+    # Finalize: review + report
+    # ------------------------------------------------------------------
+
+    def _finalize_with_report(
+        self, conversation_id: int, requirement: Requirement
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Optional code review → defect analysis → consolidated report."""
+        from flow.test_flow import FlowDataAccess
+
+        structured = requirement.structured_data or {}
+        review = structured.get("review") or {} if isinstance(structured, dict) else {}
+        review_task_id = None
+
+        if review.get("enabled") and (review.get("repo_url") or review.get("repo_path")):
+            try:
+                from service.review_service import run_review_task
+
+                task = FlowDataAccess.create_review_task(
+                    review.get("repo_url", ""),
+                    review.get("branch", "main"),
+                    int(review.get("days") or 7),
+                    repo_path=review.get("repo_path", ""),
+                    repo_type="local" if review.get("repo_path") else "remote",
+                )
+                run_review_task(task.id)
+                review_task_id = task.id
+                count = FlowDataAccess.count_review_findings(task.id)
+                review_msg = f"代码审查完成，发现 {count} 条问题。"
+                self._save_agent_message(conversation_id, "review_agent", review_msg)
+                yield {"type": "message", "complete": True, "content": review_msg}
+            except Exception as exc:
+                logger.error("Code review failed (non-fatal): %s", exc)
+                yield {
+                    "type": "message",
+                    "complete": True,
+                    "content": f"代码审查执行失败，已跳过：{exc}",
+                }
+
+        try:
+            from service.defect_service import defect_service
+            from service.report_service import report_service
+
+            defect_service.analyze_requirement(requirement.id, review_task_id)
+            report = report_service.generate_requirement_report(requirement.id, review_task_id)
+        except Exception as exc:
+            logger.error("Report generation failed: %s", exc)
+            FlowDataAccess.update_requirement(requirement.id, status="error")
+            yield {"type": "error", "message": f"报告生成失败：{exc}"}
+            return
+
+        FlowDataAccess.update_requirement(requirement.id, status="completed", current_phase="completed")
+
+        preview_url = f"/api/reports/{report.id}/preview"
+        msg_content = (
+            "测试流程已全部完成 ✅\n\n"
+            f"报告摘要：{report.summary}\n"
+            f"查看完整报告：{preview_url}"
+        )
+        self._save_agent_message(conversation_id, "router", msg_content)
+        yield {"type": "message", "complete": True, "content": msg_content}
+        yield {
+            "type": "artifact",
+            "key": "final_report",
+            "data": {
+                "report_id": report.id,
+                "preview_url": preview_url,
+                "api_url": f"/api/reports/{report.id}",
+                "summary": report.summary,
+            },
+        }
 
     # ------------------------------------------------------------------
     # Phase and agent selection
@@ -325,12 +810,27 @@ class ConversationOrchestrator:
             )
         elif phase == "generating_code":
             base += (
-                "Your task is to generate executable test scripts (pytest/Playwright) "
-                "based on the test cases and the page_map (real DOM selectors). "
+                "Your task is to generate executable test scripts based on the test cases "
+                "and the page_map (real DOM selectors). "
+                "For UI test cases, each script object MUST include BOTH a Playwright `code` "
+                "(deliverable) AND a Given-When-Then `dsl` object (executed in a real browser "
+                "via CDP). Every selector MUST come from the page_map below — do NOT guess. "
+                "For API test cases, generate a pytest `code` as usual. "
                 "Use get_requirement_environment first to check for saved URLs/credentials. "
-                "Use search_knowledge_base only for supplementary API specs. "
                 "Only ask the user for URLs or credentials if get_requirement_environment returns empty."
             )
+            # Inject the persisted page_map so selectors are real (mirrors the
+            # document-content injection done in the parsing phase).
+            if requirement and isinstance(requirement.structured_data, dict):
+                page_map = requirement.structured_data.get("page_map")
+                if page_map:
+                    import json as _json
+
+                    pm_text = _json.dumps(page_map, ensure_ascii=False)[:6000]
+                    base += (
+                        "\n\nPAGE MAP (real DOM selectors — use these EXACTLY for both "
+                        f"`code` and `dsl`):\n---\n{pm_text}\n---\n"
+                    )
         elif phase == "executing":
             base += (
                 "Your task is to execute tests and report results. "
@@ -611,13 +1111,47 @@ class ConversationOrchestrator:
         artifact_data: Dict,
         conversation_id: int,
     ):
-        """Persist an artifact and update requirement status."""
+        """Persist an artifact (to domain tables) and update requirement status.
+
+        统一在 orchestrator 落库，避免改各 agent（其 process() 仍被遗留 flow 复用，
+        在 agent 内落库会与遗留路径双写冲突）。
+        """
         if not requirement:
             return
 
+        from sqlalchemy.orm.attributes import flag_modified
+        from flow.test_flow import FlowDataAccess
         from service.agent_event_service import emit_agent_event
 
-        # Update requirement status
+        try:
+            # --- 落库到领域表 ---
+            if artifact_key == "test_cases":
+                cases = (artifact_data or {}).get("test_cases", [])
+                suite_id = (artifact_data or {}).get("metadata", {}).get("test_suite_id")
+                if cases:
+                    FlowDataAccess.save_cases(cases, requirement.id, suite_id)
+                    logger.info("Saved %d test cases for req %d", len(cases), requirement.id)
+            elif artifact_key == "test_scripts":
+                scripts = (artifact_data or {}).get("scripts", [])
+                if scripts:
+                    # Playwright/pytest scripts (deliverables + API executables)
+                    FlowDataAccess.save_scripts(scripts, requirement.id)
+                    # UI cases additionally get an executable ui_cdp DSL row
+                    self._save_ui_dsl_scripts(requirement.id, scripts)
+                    logger.info("Saved %d test scripts for req %d", len(scripts), requirement.id)
+            elif artifact_key == "page_map":
+                structured = requirement.structured_data or {}
+                if not isinstance(structured, dict):
+                    structured = {}
+                structured["page_map"] = artifact_data
+                requirement.structured_data = structured
+                flag_modified(requirement, "structured_data")
+                db.session.commit()
+        except Exception as exc:
+            logger.error("Failed to persist artifact %s: %s", artifact_key, exc)
+            db.session.rollback()
+
+        # --- 更新 requirement 状态 ---
         new_status = ARTIFACT_STATUS_MAP.get(artifact_key)
         if new_status:
             requirement.status = new_status
