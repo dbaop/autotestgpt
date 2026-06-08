@@ -282,6 +282,36 @@ function WorkbenchDetail({ item, onOpenWizard }: {
         </section>
       </div>
 
+      {item.execution_screenshots && item.execution_screenshots.length > 0 && (
+        <section className="panel panel-inner">
+          <div className="panel-heading-row">
+            <div>
+              <h3 className="section-title">执行截图</h3>
+              <p className="section-desc">最近执行记录的页面截图 — 知道"通过/失败的是什么"。</p>
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8, marginTop: 12 }}>
+            {item.execution_screenshots.map((ss, i) => (
+              <a key={i} href={ss.url} target="_blank" rel="noopener noreferrer"
+                style={{
+                  display: 'block', borderRadius: 10, overflow: 'hidden',
+                  border: `1px solid ${ss.status === 'success' ? 'rgba(0,255,136,0.3)' : 'rgba(255,45,120,0.3)'}`,
+                }}>
+                <img src={ss.url} alt={`execution screenshot ${i + 1}`}
+                  style={{ width: '100%', display: 'block', objectFit: 'cover', aspectRatio: '16/10' }} />
+                <div style={{
+                  padding: '4px 8px', fontSize: 10, fontFamily: 'var(--font-mono)',
+                  color: ss.status === 'success' ? 'var(--accent-emerald)' : 'var(--accent-magenta)',
+                  background: 'rgba(0,0,0,0.4)',
+                }}>
+                  {ss.status} · #{ss.execution_id}
+                </div>
+              </a>
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="panel panel-inner">
         <div className="panel-heading-row">
           <div>
@@ -320,8 +350,12 @@ export default function AgentWorkbench() {
         setItems(res.data.items || [])
       }
       setError('')
-    } catch {
-      setError('加载 Agent 工作台失败')
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setError(`需求 #${rid} 不存在，可能已被删除或数据库已重置。请返回需求工作台重新创建。`)
+      } else {
+        setError('加载 Agent 工作台失败')
+      }
     } finally {
       setLoading(false)
     }
@@ -332,6 +366,14 @@ export default function AgentWorkbench() {
     const timer = window.setInterval(load, 5000)
     return () => window.clearInterval(timer)
   }, [load])
+
+  // Stop polling on terminal error (404 = requirement gone)
+  useEffect(() => {
+    if (error && error.includes('不存在')) {
+      // 404 is permanent — no need to keep polling
+      return
+    }
+  }, [error])
 
   const selected = useMemo(() => {
     if (!rid) return items[0]

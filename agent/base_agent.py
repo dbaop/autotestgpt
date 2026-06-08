@@ -293,6 +293,11 @@ class BaseAgent(ABC):
         repaired = re.sub(r',\s*\]', ']', repaired)
         # Remove trailing comma at end of string
         repaired = re.sub(r',\s*$', '', repaired)
+        # Fix LLM template placeholders in JSON values
+        repaired = re.sub(r'"(true/false)"', '"false"', repaired)  # "required": true/false → false
+        repaired = re.sub(r':\s*true/false\b', ': false', repaired)  # required: true/false → false
+        repaired = re.sub(r'"(string/integer/boolean|string|integer|boolean|number|object|array)"', '"string"', repaired)
+        repaired = re.sub(r':\s*(string/integer/boolean)\b', ': "string"', repaired)
         # Fix missing comma: "value"\n  "key" → "value",\n  "key"
         repaired = re.sub(r'"\s*\n\s*"', '",\n  "', repaired)
         # Fix missing comma: }\n  "key" → },\n  "key"

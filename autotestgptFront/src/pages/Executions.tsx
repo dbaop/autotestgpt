@@ -166,7 +166,7 @@ export default function Executions() {
           <table className="data-table">
             <thead>
               <tr>
-                {['ID', 'STATUS', 'TIME', 'STARTED', 'ERROR'].map(l => (
+                {['ID', 'STATUS', 'TIME', 'STARTED', 'SCREENSHOTS', 'ERROR'].map(l => (
                   <th key={l}>{l}</th>
                 ))}
               </tr>
@@ -199,6 +199,24 @@ export default function Executions() {
                       <span style={{ fontFamily: S.mono, fontSize: 11, color: S.text3 }}>
                         {ex.started_at ? new Date(ex.started_at).toLocaleString('zh-CN') : '--'}
                       </span>
+                    </td>
+                    <td>
+                      {(ex.screenshot_paths?.length ?? 0) > 0 ? (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                          {ex.screenshot_paths.map((path, i) => (
+                            <a key={i} href={`/${path}`} target="_blank" rel="noopener noreferrer"
+                              title={`截图 ${i + 1}`}>
+                              <img src={`/${path}`} alt={`screenshot ${i + 1}`}
+                                style={{
+                                  width: 48, height: 32, objectFit: 'cover',
+                                  borderRadius: 4, border: '1px solid var(--border-subtle)',
+                                }} />
+                            </a>
+                          ))}
+                        </div>
+                      ) : (
+                        <span style={{ color: S.text3, fontFamily: S.mono, fontSize: 11 }}>--</span>
+                      )}
                     </td>
                     <td>
                       <ErrorDetails message={ex.error_message} />

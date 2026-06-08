@@ -41,6 +41,7 @@ export interface ExecutionRecord {
   status: 'success' | 'failed' | 'error' | 'running'
   execution_time: number
   error_message: string
+  screenshot_paths: string[]
   started_at: string
   finished_at: string
   report_path: string
@@ -407,6 +408,7 @@ export interface AgentWorkbenchItem {
     payload?: Record<string, unknown>
   }>
   interventions: Array<{ type?: string; message?: string; test_url?: string }>
+  execution_screenshots: Array<{ path: string; url: string; status: string; execution_id: number }>
   overall_progress: { status: string; updated_at?: string | null }
 }
 

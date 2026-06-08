@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 from agent.exec_agent import ExecAgent
 from flow.test_flow import AutoTestFlow
-from models import Conversation, ExecutionRecord, Requirement, TestCase, TestScript, db
+from models import Conversation, ExecutionRecord, Message, Requirement, TestCase, TestScript, db
 from service.errors import NotFoundError, ValidationError
 
 
@@ -25,17 +25,6 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _set_requirement_status(requirement_id: int, status: str, execution_progress: dict | None = None):
-    requirement = db.session.get(Requirement, requirement_id)
-    if not requirement:
-        raise NotFoundError(f"Requirement {requirement_id} not found")
-    requirement.status = status
-    if execution_progress is not None:
-        requirement.execution_progress = execution_progress
-    db.session.commit()
-    return requirement
-
-
 def _resolve_flask_app():
     from flask import has_app_context, current_app
 
@@ -45,6 +34,10 @@ def _resolve_flask_app():
 
     return app
 
+
+# ---------------------------------------------------------------------------
+# Legacy flow execution (used only when CONVERSATION_FLOW_ENABLED=False)
+# ---------------------------------------------------------------------------
 
 def _execute_flow_async_impl(flow, flow_data, requirement_id):
     flow_id = str(id(flow))
@@ -80,7 +73,11 @@ def execute_flow_async(flow, flow_data, requirement_id):
         _execute_flow_async_impl(flow, flow_data, requirement_id)
 
 
-def _extract_doc_from_url(url: str) -> str | None:
+# ---------------------------------------------------------------------------
+# Document extraction
+# ---------------------------------------------------------------------------
+
+def _extract_doc_from_url(url: str) -> dict | None:
     """Try to extract document content from *url* via CDP browser probe."""
     try:
         from service.browser_probe_service import get_browser_probe
@@ -92,11 +89,17 @@ def _extract_doc_from_url(url: str) -> str | None:
         result = probe.extract_content()
         if result.get("ok") and result.get("length", 0) > 50:
             logger.info("CDP extracted %d chars from %s", result["length"], url)
-            return (
+            content = (
                 f"【来源】{result.get('url', url)}\n"
                 f"【标题】{result.get('title', '')}\n\n"
                 f"{result.get('content', '')}"
             )
+            return {
+                "content": content,
+                "url": url,
+                "title": result.get("title", ""),
+                "extracted_at": _now().isoformat(),
+            }
         logger.warning("CDP extracted too little content from %s: %d chars", url, result.get("length", 0))
         return None
     except Exception as exc:
@@ -104,41 +107,76 @@ def _extract_doc_from_url(url: str) -> str | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Orchestrator thread helper — always use app context
+# ---------------------------------------------------------------------------
+
+def _run_orchestrator_in_thread(fn, conversation_id: int, requirement_id: int):
+    """Execute an orchestrator generator in a background thread with app context."""
+    from service.sse_service import push_sse_event, broadcast_error
+
+    flask_app = _resolve_flask_app()
+    with flask_app.app_context():
+        try:
+            for event in fn():
+                push_sse_event(conversation_id, event)
+        except Exception as exc:
+            logger.exception("Orchestrator flow failed for requirement %d", requirement_id)
+            broadcast_error(conversation_id, str(exc))
+            try:
+                req = db.session.get(Requirement, requirement_id)
+                if req:
+                    req.status = "error"
+                    req.execution_progress = (req.execution_progress or {}) | {
+                        "error": str(exc)[:500],
+                        "failed_at": _now().isoformat(),
+                    }
+                    db.session.commit()
+            except Exception:
+                pass
+        finally:
+            remove = getattr(db.session, "remove", None)
+            if callable(remove):
+                remove()
+
+
+# ---------------------------------------------------------------------------
+# start_flow / resume_flow
+# ---------------------------------------------------------------------------
+
 def start_flow(data: dict):
     demand = (data.get("demand") or "").strip()
     doc_url = (data.get("doc_url") or "").strip()
+
+    test_environment = data.get("test_environment") or {}
+    structured_seed: dict = {"test_environment": test_environment}
+    original_document = None
 
     # 如果提供了文档 URL（钉钉/飞书/语雀等），通过 CDP 自动提取内容
     if doc_url and not demand:
         extracted = _extract_doc_from_url(doc_url)
         if extracted:
-            demand = extracted
+            demand = extracted["content"]
+            original_document = {
+                "url": doc_url,
+                "title": extracted.get("title", ""),
+                "extracted_content": demand,
+                "extracted_at": extracted.get("extracted_at"),
+            }
         else:
-            # CDP 提取失败时，把 URL 当作需求描述，让 agent 自己去打开
+            # CDP 提取失败时，标记需要 retry
             demand = f"请打开以下文档链接并提取测试需求:\n{doc_url}"
+            original_document = {"url": doc_url, "needs_retry": True}
+
+    if original_document:
+        structured_seed["original_document"] = original_document
+    if doc_url:
+        structured_seed["doc_url"] = doc_url
 
     if not demand:
         raise ValidationError("Please provide `demand` or `doc_url` field")
 
     project_id = data.get("project_id", 1)
-    # 保存原始文档 URL 供后续参考
-    original_doc_url = doc_url or None
-    test_environment = data.get("test_environment") or {}
-    structured_seed = {"test_environment": test_environment}
-    if original_doc_url:
-        structured_seed["doc_url"] = original_doc_url
-    requirement = Requirement(
-        title=data.get("title") or f"Requirement-{_now().strftime('%Y%m%d-%H%M%S')}",
-        description=demand[:100] + "..." if len(demand) > 100 else demand,
-        raw_text=demand,
-        structured_data=structured_seed,
-        status="pending",
-        execution_progress={"test_environment": test_environment} if test_environment else None,
-        knowledge_base_id=data.get("knowledge_base_id"),
-        project_id=project_id,
-    )
-    test_environment = data.get("test_environment") or {}
-    structured_seed = {"test_environment": test_environment} if test_environment else None
     requirement = Requirement(
         title=data.get("title") or f"Requirement-{_now().strftime('%Y%m%d-%H%M%S')}",
         description=demand[:100] + "..." if len(demand) > 100 else demand,
@@ -163,18 +201,12 @@ def start_flow(data: dict):
     # Orchestrator mode: kick off the conversation-driven flow
     from config import Config
     if Config.CONVERSATION_FLOW_ENABLED:
-        import json as _json
-        from service.sse_service import push_sse_event, broadcast_error
+        from agent.orchestrator import process_user_message_flow
 
-        def _run_orchestrator_flow():
-            from agent.orchestrator import process_user_message_flow
-            try:
-                for event in process_user_message_flow(conversation.id, demand):
-                    push_sse_event(conversation.id, event)
-            except Exception as exc:
-                broadcast_error(conversation.id, str(exc))
+        def _fn():
+            return process_user_message_flow(conversation.id, demand)
 
-        _executor.submit(_run_orchestrator_flow)
+        _executor.submit(_run_orchestrator_in_thread, _fn, conversation.id, requirement.id)
 
         return {
             "message": "Test flow started (orchestrator mode)",
@@ -265,10 +297,64 @@ def resume_flow(requirement_id: int):
         if fi.get("status") == "running":
             return {"message": "Flow is running", "status": current_status}, 200
 
+    from config import Config
+
+    # Orchestrator mode
+    if Config.CONVERSATION_FLOW_ENABLED:
+        conversation = Conversation.query.filter_by(
+            requirement_id=requirement_id,
+        ).order_by(Conversation.id.asc()).first()
+
+        if not conversation:
+            # No conversation yet — create one or fall back to legacy
+            conversation = Conversation(
+                title=f"需求 #{requirement.id} · {(requirement.title or '')[:40]}",
+                requirement_id=requirement.id,
+                status="active",
+            )
+            db.session.add(conversation)
+            db.session.commit()
+
+        # Reset error status
+        if current_status == "error":
+            requirement.status = "pending"
+            db.session.commit()
+
+        # Build resume message
+        env = (requirement.execution_progress or {}).get("test_environment") or \
+              (requirement.structured_data or {}).get("test_environment") or {}
+        if env.get("test_url"):
+            resume_msg = f"测试地址 {env['test_url']} 已配置，请开始探索页面并推进测试流程"
+        else:
+            resume_msg = "请开始解析需求并推进测试流程"
+
+        user_msg = Message(
+            conversation_id=conversation.id,
+            sender="user",
+            content=resume_msg,
+            agent_type="user",
+        )
+        db.session.add(user_msg)
+        db.session.commit()
+
+        from agent.orchestrator import process_user_message_flow
+
+        def _fn():
+            return process_user_message_flow(conversation.id, resume_msg)
+
+        _executor.submit(_run_orchestrator_in_thread, _fn, conversation.id, requirement_id)
+        return {
+            "message": "Flow resumed (orchestrator mode)",
+            "requirement_id": requirement_id,
+            "conversation_id": conversation.id,
+            "status": "processing",
+            "orchestrator_mode": True,
+        }, 202
+
+    # Legacy mode
     flow = AutoTestFlow()
     flow_data = {"demand": requirement.raw_text, "requirement_id": requirement_id, "project_id": requirement.project_id or 1}
 
-    # 带上已保存的测试环境配置，确保 resume 后 agent 能拿到 URL/登录态/凭据
     progress = requirement.execution_progress or {}
     structured = requirement.structured_data or {}
     test_environment = progress.get("test_environment") or structured.get("test_environment")
@@ -327,6 +413,7 @@ def retry_script(script_id: int):
         error_message=result.get("error"),
         execution_time=result.get("execution_time", 0),
         report_path=result.get("report_path"),
+        screenshot_paths=result.get("screenshots", []),
         started_at=_now(),
         finished_at=_now(),
     )

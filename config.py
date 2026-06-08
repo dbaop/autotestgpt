@@ -20,9 +20,10 @@ class Config:
     SERVER_PORT = int(os.getenv("SERVER_PORT", 8000))
     WORKSPACE = "./workspace"
     REPORT_DIR = "./report"
+    SCREENSHOT_DIR = "./workspace/screenshots"
 
     # Feature flag: enable conversation-driven test flow (instead of rigid pipeline)
-    CONVERSATION_FLOW_ENABLED = os.getenv("CONVERSATION_FLOW_ENABLED", "false").lower() == "true"
+    CONVERSATION_FLOW_ENABLED = os.getenv("CONVERSATION_FLOW_ENABLED", "true").lower() != "false"
 
     DB_HOST = os.getenv("DB_HOST", "")
     DB_PORT = int(os.getenv("DB_PORT", 3306))

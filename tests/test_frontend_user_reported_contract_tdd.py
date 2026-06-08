@@ -112,3 +112,74 @@ def test_agent_workbench_has_polished_operational_layout():
     assert "agent-rail" in source
     assert "timeline-panel" in source
     assert "补齐环境后继续执行" in source
+
+
+def test_orchestrator_mode_enabled_by_default():
+    from config import Config
+    # Default should be orchestrator mode (CONVERSATION_FLOW_ENABLED != "false")
+    assert Config.CONVERSATION_FLOW_ENABLED is True
+
+
+def test_orchestrator_detects_env_from_chat_message():
+    """_try_save_env_from_message should detect test_url and login_state from chat."""
+    import sys
+    import tempfile
+    from pathlib import Path as _Path
+
+    from flask import Flask
+    import werkzeug
+    if not hasattr(werkzeug, "__version__"):
+        werkzeug.__version__ = "3"
+
+    RO = _Path(__file__).resolve().parents[1]
+    if str(RO) not in sys.path:
+        sys.path.insert(0, str(RO))
+
+    from agent.orchestrator import ConversationOrchestrator
+    from models import db, Requirement
+
+    app = Flask(__name__)
+    orch_tmp = _Path("workspace") / "pytest_orch_env"
+    orch_tmp.mkdir(parents=True, exist_ok=True)
+    tmp = _Path(tempfile.mkdtemp(dir=orch_tmp))
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{tmp / 'orch_env.db'}"
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
+
+    with app.app_context():
+        db.create_all()
+        req = Requirement(
+            title="Test", description="test", raw_text="test",
+            structured_data={}, execution_progress={}, status="pending",
+        )
+        db.session.add(req)
+        db.session.commit()
+
+        orch = ConversationOrchestrator()
+
+        # Test URL detection
+        result = orch._try_save_env_from_message(req, "测试地址 https://staging.example.com", 1)
+        assert result is not None
+        assert "测试地址" in result
+        env = (req.structured_data or {}).get("test_environment", {})
+        assert env.get("test_url") == "https://staging.example.com"
+
+        # Login state detection
+        result2 = orch._try_save_env_from_message(req, "登录态 no_login_required", 1)
+        assert result2 is not None
+        assert "登录态" in result2
+        env2 = (req.structured_data or {}).get("test_environment", {})
+        assert env2.get("login_state") == "no_login_required"
+
+        # Credential detection
+        result3 = orch._try_save_env_from_message(req, "凭据 vault://login/admin", 1)
+        assert result3 is not None
+        assert "凭据" in result3
+        env3 = (req.structured_data or {}).get("test_environment", {})
+        assert env3.get("credential_ref") == "vault://login/admin"
+
+        # Non-env message should return None
+        result4 = orch._try_save_env_from_message(req, "你好，请开始分析需求", 1)
+        assert result4 is None
+
+        db.session.remove()

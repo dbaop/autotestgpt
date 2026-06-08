@@ -368,7 +368,16 @@ class AutoTestFlow:
         logger.info(f"步骤1: 解析需求 (ID: {requirement_id})")
         _emit_event(requirement_id, 'ReqAgent', 'started', '开始解析需求')
         try:
+            # Preserve original_document from structured_data before ReqAgent overwrites it
+            requirement = self.da.get_requirement(requirement_id)
+            orig_doc = (requirement.structured_data or {}).get("original_document") if requirement else None
+
             structured_req = self.req_agent.process({'demand': demand})
+
+            # Carry forward the original_document reference for downstream agents
+            if orig_doc:
+                structured_req["original_document"] = orig_doc
+
             self.da.update_requirement(
                 requirement_id,
                 title=structured_req.get('title', ''),
@@ -477,6 +486,7 @@ class AutoTestFlow:
                     'script_content': script.script_content,
                     'file_path': script.file_path,
                     'script_type': script.script_type,
+                    'test_url': env.get('test_url', ''),
                 })
 
                 elapsed = result.get('execution_time', 0)
@@ -493,6 +503,7 @@ class AutoTestFlow:
                     error_message=result.get('error'),
                     execution_time=elapsed,
                     report_path=result.get('report_path'),
+                    screenshot_paths=result.get('screenshots', []),
                     started_at=_now(),
                     finished_at=_now(),
                 )

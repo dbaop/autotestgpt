@@ -151,6 +151,7 @@ class ExecutionRecord(db.Model):
     error_message = db.Column(db.Text)
     execution_time = db.Column(db.Float)
     report_path = db.Column(db.String(500))
+    screenshot_paths = db.Column(db.JSON)
     started_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     finished_at = db.Column(db.DateTime)
 
@@ -161,6 +162,7 @@ class ExecutionRecord(db.Model):
             'status': self.status,
             'execution_time': self.execution_time,
             'error_message': self.error_message,
+            'screenshot_paths': self.screenshot_paths or [],
             'started_at': self.started_at.isoformat() if self.started_at else None,
             'finished_at': self.finished_at.isoformat() if self.finished_at else None,
             'report_path': self.report_path,

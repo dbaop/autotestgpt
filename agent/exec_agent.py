@@ -45,8 +45,14 @@ class ExecAgent(ToolCapableAgent):
             script_content = input_data['script_content']
             file_path = input_data.get('file_path')
             script_type = input_data.get('script_type', 'python')
+            test_url = input_data.get('test_url', '')
 
             logger.info(f"开始执行测试脚本: {script_id} (类型: {script_type})")
+
+            # Capture before-screenshot if test_url is available
+            screenshots = self._capture_execution_screenshots(
+                script_id=script_id, test_url=test_url,
+            )
 
             execution_result = self.execute_script(
                 script_content=script_content,
@@ -54,6 +60,12 @@ class ExecAgent(ToolCapableAgent):
                 script_type=script_type,
                 script_id=script_id,
             )
+
+            # Capture after-screenshot
+            after_screenshots = self._capture_execution_screenshots(
+                script_id=script_id, test_url=test_url, suffix="after",
+            )
+            screenshots.extend(after_screenshots)
 
             report_data = self.generate_report(execution_result, script_id)
 
@@ -65,6 +77,7 @@ class ExecAgent(ToolCapableAgent):
                 'error': execution_result['error'],
                 'report_path': report_data.get('report_path'),
                 'report_url': report_data.get('report_url'),
+                'screenshots': screenshots,
                 'started_at': execution_result['started_at'],
                 'finished_at': execution_result['finished_at'],
                 'result': {
@@ -84,6 +97,7 @@ class ExecAgent(ToolCapableAgent):
                 'script_id': input_data.get('script_id', 'unknown'),
                 'status': 'error',
                 'error': str(e),
+                'screenshots': [],
                 'started_at': datetime.now(timezone.utc).isoformat(),
                 'finished_at': datetime.now(timezone.utc).isoformat(),
             }
@@ -104,18 +118,23 @@ class ExecAgent(ToolCapableAgent):
         """Interactive test execution with file reading, CDP probing, and self-healing."""
         tools_prompt = format_tools_prompt(self._tools)
         full_system = (
-            "You are a test execution engineer with browser CDP access for self-healing.\n\n"
+            "You are a test execution engineer with browser CDP access for self-healing "
+            "and visual evidence collection.\n\n"
             "## Your workflow\n"
             "1. Read the test scripts with read_workspace_file.\n"
-            "2. Execute them and collect results.\n"
-            "3. If a test FAILS with a selector/locator error (e.g. 'selector not found', "
+            "2. Use get_requirement_environment to get the test URL.\n"
+            "3. Use browser_navigate to open the test URL, then browser_screenshot "
+            "to capture a BEFORE screenshot — the user needs visual evidence of what passed or failed.\n"
+            "4. Execute the scripts and collect results.\n"
+            "5. After execution, use browser_screenshot again to capture an AFTER screenshot.\n"
+            "6. If a test FAILS with a selector/locator error (e.g. 'selector not found', "
             "'element not visible', 'no such element'):\n"
             "   a. Use browser_navigate to open the same URL the test was targeting.\n"
             "   b. Use browser_snapshot to capture the current DOM.\n"
             "   c. Compare the failed selector with the actual DOM elements.\n"
             "   d. Find the correct selector from the snapshot and report the fix.\n"
-            "4. If the page looks different from what the test expects, take a browser_screenshot.\n"
-            "5. Produce a **script_fix** artifact with the corrected selectors.\n\n"
+            "7. If the page looks different from what the test expects, take a browser_screenshot.\n"
+            "8. Produce a **script_fix** artifact with the corrected selectors.\n\n"
             + tools_prompt
         )
         yield from super().act(conversation_messages, full_system)
@@ -252,6 +271,39 @@ class ExecAgent(ToolCapableAgent):
                 'finished_at': finished_at.isoformat(),
             }
 
+    # ------------------------------------------------------------------
+    # 截图采集
+    # ------------------------------------------------------------------
+
+    def _capture_execution_screenshots(self, script_id, test_url="", suffix="before") -> list:
+        """Take a screenshot of the test target page via BrowserProbe.
+
+        Does not raise — failures are logged and returned as empty list.
+        """
+        screenshots = []
+        if not test_url:
+            return screenshots
+        try:
+            from service.browser_probe_service import get_browser_probe
+            from service.screenshot_service import save_screenshot_from_data_url
+
+            probe = get_browser_probe()
+            nav = probe.navigate(test_url)
+            if not nav.get("ok"):
+                logger.info("Screenshot skip: browser navigate failed for %s", test_url)
+                return screenshots
+
+            result = probe.screenshot()
+            if result.get("ok") and result.get("data_url"):
+                path = save_screenshot_from_data_url(
+                    result["data_url"], prefix=f"exec_{script_id}_{suffix}",
+                )
+                if path:
+                    screenshots.append(path)
+        except Exception as exc:
+            logger.warning("Screenshot capture failed (non-fatal): %s", exc)
+        return screenshots
+
     @staticmethod
     def _parse_pytest_summary(output: str):
         assertions = failures = errors = 0
@@ -315,7 +367,8 @@ class ExecAgent(ToolCapableAgent):
             status_text=status_text,
             execution_time=execution_result.get('execution_time', 0),
             assertions=execution_result.get('assertions', 0),
-            passed=execution_result.get('passed', 0),
+            passed=execution_result.get('assertions', 0),
+            screenshots=execution_result.get('screenshots', []),
             started_at=execution_result.get('started_at', 'N/A'),
             finished_at=execution_result.get('finished_at', 'N/A'),
             returncode=execution_result.get('returncode', 'N/A'),

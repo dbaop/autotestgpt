@@ -137,6 +137,9 @@ def _ensure_all_columns():
         ('conversations', 'last_read_at',
          'ALTER TABLE conversations ADD COLUMN last_read_at DATETIME',
          'ALTER TABLE conversations ADD COLUMN last_read_at DATETIME NULL'),
+        ('execution_records', 'screenshot_paths',
+         'ALTER TABLE execution_records ADD COLUMN screenshot_paths JSON',
+         'ALTER TABLE execution_records ADD COLUMN screenshot_paths JSON NULL'),
     ]
     for table, col, sqlite_ddl, mysql_ddl in migrations:
         try:
@@ -258,6 +261,19 @@ def serve_index():
     return send_from_directory(FRONTEND_DIST, 'index.html')
 
 
+@app.route('/screenshots/<path:filename>')
+def serve_screenshot(filename):
+    """Serve saved execution screenshots (before catch-all SPA route)."""
+    from pathlib import Path
+    screenshot_dir = Path(Config.SCREENSHOT_DIR).resolve()
+    file_path = (screenshot_dir / filename).resolve()
+    if not str(file_path).startswith(str(screenshot_dir)):
+        return jsonify({'error': 'Forbidden'}), 403
+    if file_path.exists():
+        return send_from_directory(str(screenshot_dir), filename)
+    return jsonify({'error': 'Not found'}), 404
+
+
 @app.route('/<path:filename>')
 def serve_static(filename):
     if filename.startswith('api/'):
@@ -328,6 +344,7 @@ if __name__ == '__main__':
 
     os.makedirs(Config.WORKSPACE, exist_ok=True)
     os.makedirs(Config.REPORT_DIR, exist_ok=True)
+    os.makedirs(Config.SCREENSHOT_DIR, exist_ok=True)
 
     app.run(
         host='0.0.0.0',

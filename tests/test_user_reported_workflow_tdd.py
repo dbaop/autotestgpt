@@ -129,6 +129,7 @@ def test_resume_error_requirement_retries_generated_scripts(monkeypatch):
     retry_db_path = _local_tmp_dir() / "retry_error_flow.db"
     monkeypatch.setenv("DATABASE_URI", f"sqlite:///{retry_db_path.as_posix()}")
     importlib.reload(config_module)
+    monkeypatch.setattr(config_module.Config, "CONVERSATION_FLOW_ENABLED", False)
     sys.modules.pop("main", None)
     import main
 

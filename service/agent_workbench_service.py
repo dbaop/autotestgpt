@@ -19,6 +19,46 @@ from models import (
     TestScript,
     db,
 )
+from service.screenshot_service import build_screenshot_url
+
+
+def _recent_execution_screenshots(requirement_id: int) -> list[dict[str, Any]]:
+    """Collect recent execution records with screenshot_paths for the workbench.
+
+    Gracefully returns empty list if the column doesn't exist yet (before migration).
+    """
+    try:
+        cases = TestCase.query.filter_by(requirement_id=requirement_id).all()
+        case_ids = [c.id for c in cases]
+        if not case_ids:
+            return []
+        scripts = TestScript.query.filter(TestScript.test_case_id.in_(case_ids)).all()
+        script_ids = [s.id for s in scripts]
+        if not script_ids:
+            return []
+        records = (
+            ExecutionRecord.query
+            .filter(ExecutionRecord.test_script_id.in_(script_ids))
+            .filter(ExecutionRecord.screenshot_paths != None)
+            .order_by(ExecutionRecord.started_at.desc())
+            .limit(10)
+            .all()
+        )
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for rec in records:
+            for p in (rec.screenshot_paths or []):
+                if p not in seen:
+                    seen.add(p)
+                    result.append({
+                        "path": p,
+                        "url": build_screenshot_url(p),
+                        "status": rec.status,
+                        "execution_id": rec.id,
+                    })
+        return result
+    except Exception:
+        return []
 
 AGENT_DEFS = [
     ("req_agent", "ReqAgent", 0),
@@ -316,6 +356,7 @@ def build_requirement_workbench(requirement: Requirement) -> dict[str, Any]:
         "artifacts": artifacts,
         "agents": agents,
         "events": events,
+        "execution_screenshots": _recent_execution_screenshots(requirement.id),
         "interventions": _interventions(events, environment),
         "overall_progress": {
             "status": requirement.status,

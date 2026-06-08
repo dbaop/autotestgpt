@@ -104,6 +104,28 @@ class ConversationOrchestrator:
         requirement_id = conversation.requirement_id
         requirement = db.session.get(Requirement, requirement_id) if requirement_id else None
 
+        # Detect and save environment config from chat messages
+        env_saved = self._try_save_env_from_message(requirement, user_message, conversation_id)
+        if env_saved:
+            # Confirm the env update and stop — let user trigger next action
+            confirm_msg = Message(
+                conversation_id=conversation_id,
+                sender="router",
+                content=(
+                    f"已记录环境配置 ({env_saved})。\n\n"
+                    f"需求状态: **{requirement.status if requirement else 'pending'}**。"
+                    f"你可以输入消息开始需求解析，比如发一条「分析需求」或「开始」，"
+                    f"我会自动提取文档内容、设计用例、生成脚本并执行测试。"
+                ),
+                agent_type="router",
+                extra_data={"source": "env_setup_detected", "saved": env_saved},
+            )
+            db.session.add(confirm_msg)
+            db.session.commit()
+            yield {"type": "message", "complete": True, "content": confirm_msg.content}
+            yield {"type": "done"}
+            return
+
         # Check if resuming from a waiting_user state
         if requirement and requirement_id in self._active_generators:
             # Resume the active agent with user's response
@@ -255,13 +277,35 @@ class ConversationOrchestrator:
             base += (
                 "Your task is to understand the user's testing needs. "
                 "IMPORTANT: You are analyzing the SYSTEM/FEATURES described in the user's input, "
-                "NOT the document/URL itself. If the user provides a document link, extract its "
-                "content and base your analysis on what the document DESCRIBES (the business system), "
-                "not on 'document parsing'. "
+                "NOT the document/URL itself. "
                 "Use search_knowledge_base to find relevant documentation. "
                 "If information is insufficient, use ask_user to clarify. "
-                "When you have enough information, produce a structured requirement."
+                "If you have SOME information (even just a URL or brief description), "
+                "produce a PARTIAL structured requirement and ask the user to fill gaps. "
+                "Do NOT get stuck trying to open a URL if the browser is unavailable — "
+                "ask the user to paste the document content directly."
             )
+            # Inject pre-extracted document content so ReqAgent has the real doc text
+            if requirement and requirement.structured_data:
+                doc = requirement.structured_data.get("original_document")
+                if doc and doc.get("extracted_content") and not doc.get("needs_retry"):
+                    content = doc["extracted_content"]
+                    base += (
+                        f"\n\nPRE-EXTRACTED DOCUMENT CONTENT "
+                        f"(from {doc.get('url', 'unknown source')}):\n"
+                        f"---\n{content[:8000]}\n---\n"
+                        "Use the above content as the PRIMARY basis for your requirement "
+                        "analysis. Do NOT re-navigate or re-extract — the content is already "
+                        "here. Focus on the business features described in the document."
+                    )
+                elif doc and doc.get("needs_retry"):
+                    base += (
+                        f"\n\nNOTE: A document URL ({doc.get('url', '')}) was provided but "
+                        "could not be automatically extracted. If you have browser tools "
+                        "(browser_navigate + browser_extract_content), try them now. "
+                        "If the browser is unavailable, work with whatever information the "
+                        "user has provided. Ask the user for the key requirements if needed."
+                    )
         elif phase == "exploring":
             base += (
                 "Your task is to open the target application in the browser and explore its UI. "
@@ -306,6 +350,91 @@ class ConversationOrchestrator:
     # ------------------------------------------------------------------
     # Environment helpers
     # ------------------------------------------------------------------
+
+    def _try_save_env_from_message(
+        self, requirement: Optional[Requirement], message: str, conversation_id: int,
+    ) -> Optional[str]:
+        """Detect and save environment config from a user chat message.
+
+        Returns a comma-separated list of saved keys if anything was saved, or None.
+        """
+        if not requirement:
+            return None
+        import re
+
+        saved: list[str] = []
+
+        # --- test_url ---
+        url_m = re.search(
+            r'(?:测试地址|test_url|测试环境|地址|url)[：:\s]*'
+            r'(https?://[^\s,，。；;]+)',
+            message, re.IGNORECASE,
+        )
+        if url_m:
+            test_url = url_m.group(1).rstrip("/")
+            self._merge_env(requirement, "test_url", test_url)
+            saved.append("测试地址")
+        else:
+            # Bare URL in message
+            bare_url = re.search(r'(https?://[^\s,，。；;]{10,})', message)
+            if bare_url and not (
+                "feishu" in bare_url.group(1) or "dingtalk" in bare_url.group(1)
+                or "yuque" in bare_url.group(1) or "notion" in bare_url.group(1)
+            ):
+                test_url = bare_url.group(1).rstrip("/")
+                self._merge_env(requirement, "test_url", test_url)
+                saved.append("测试地址")
+
+        # --- login_state ---
+        ls_m = re.search(
+            r'(?:登录态|login_state|登录方式)[：:\s]*'
+            r'(no_login_required|pre_authenticated|requires_login|unknown)',
+            message, re.IGNORECASE,
+        )
+        if ls_m:
+            self._merge_env(requirement, "login_state", ls_m.group(1).lower())
+            saved.append("登录态")
+
+        # --- credential_ref ---
+        cred_m = re.search(
+            r'(?:凭据|credential|credential_ref|vault)[：:\s]*'
+            r'([^\s,，。；;]{3,80})',
+            message, re.IGNORECASE,
+        )
+        if cred_m:
+            self._merge_env(requirement, "credential_ref", cred_m.group(1))
+            saved.append("凭据")
+
+        if saved:
+            db.session.commit()
+            logger.info("Saved env from chat for req %d: %s", requirement.id, saved)
+            return ", ".join(saved)
+        return None
+
+    def _merge_env(self, requirement: Requirement, key: str, value: str):
+        """Merge a key into the requirement's test_environment across both
+        structured_data and execution_progress."""
+        from sqlalchemy.orm.attributes import flag_modified
+
+        progress = requirement.execution_progress or {}
+        structured = requirement.structured_data or {}
+
+        if not isinstance(progress, dict):
+            progress = {}
+        if not isinstance(structured, dict):
+            structured = {}
+
+        # Update in both places so all agents can see it
+        for container in (progress, structured):
+            env = container.setdefault("test_environment", {})
+            env[key] = value
+
+        requirement.execution_progress = progress
+        requirement.structured_data = structured
+
+        # JSON columns need explicit dirty marking when mutated in-place
+        flag_modified(requirement, "execution_progress")
+        flag_modified(requirement, "structured_data")
 
     def _get_environment_info(self, requirement: Requirement) -> str:
         """Extract saved environment config from the requirement for agent prompts."""
