@@ -69,6 +69,7 @@ api_blueprint.add_url_rule('/agent-workbench/<int:requirement_id>', view_func=ag
 api_blueprint.add_url_rule('/flow/start', view_func=flow.start_test_flow, methods=['POST'])
 api_blueprint.add_url_rule('/flow/status/<int:req_id>', view_func=flow.get_test_flow_status, methods=['GET'])
 api_blueprint.add_url_rule('/flow/resume/<int:req_id>', view_func=flow.resume_test_flow, methods=['POST'])
+api_blueprint.add_url_rule('/flow/cancel/<int:req_id>', view_func=flow.cancel_test_flow, methods=['POST'])
 api_blueprint.add_url_rule('/flow/retry-script/<int:script_id>', view_func=flow.retry_test_script, methods=['POST'])
 
 # Agent config

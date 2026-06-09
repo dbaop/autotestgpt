@@ -248,15 +248,10 @@ class BaseAgent(ABC):
         json_str = self._extract_fenced_json(response)
 
         if json_str is None:
-            # Fallback: find the outermost { ... } using brace counting
-            start = response.find('{')
-            if start == -1:
-                # Try to find a JSON array
-                start = response.find('[')
-                if start != -1:
-                    json_str = self._extract_balanced(response, start, '[', ']')
-            else:
-                json_str = self._extract_balanced(response, start, '{', '}')
+            # Fallback: scan for the first balanced { ... } / [ ... ] that
+            # actually parses — avoids grabbing JS object literals like
+            # `{ test, expect }` from leftover code blocks.
+            json_str = self._find_first_parsable_block(response)
 
         if json_str is None:
             json_str = response
@@ -308,45 +303,97 @@ class BaseAgent(ABC):
             return None
         return repaired
 
+    # Code-block languages that must NOT be treated as JSON. Without this guard
+    # a ```javascript block's `{ test, expect }` destructuring gets misparsed as
+    # JSON and fails at "char 2".
+    _NON_JSON_FENCE_LANGS = {
+        "javascript", "js", "jsx", "typescript", "ts", "tsx", "python", "py",
+        "bash", "sh", "shell", "java", "go", "rust", "ruby", "rb", "php",
+        "html", "css", "xml", "yaml", "yml", "sql", "c", "cpp", "csharp",
+    }
+
     @staticmethod
     def _extract_fenced_json(response: str) -> Optional[str]:
-        """Extract JSON from a ```json ... ``` fenced block, handling nested braces."""
+        """Extract JSON from a ```json ... ``` (or untagged) fenced block.
+
+        Skips code-language fences (```javascript / ```python / …) so their
+        object literals are never misread as JSON. Among candidate fences,
+        returns the first whose content actually parses.
+        """
         import re
 
-        for match in re.finditer(r'```(?:json)?\s*\n?', response):
+        def _parses(text: str) -> bool:
+            try:
+                json.loads(text)
+                return True
+            except Exception:
+                pass
+            try:
+                import json5
+                json5.loads(text)
+                return True
+            except Exception:
+                return False
+
+        for match in re.finditer(r'```([A-Za-z0-9_+#-]*)[ \t]*\r?\n?', response):
+            lang = (match.group(1) or "").lower()
+            if lang in BaseAgent._NON_JSON_FENCE_LANGS:
+                continue  # not a JSON block — skip
+
             fence_start = match.end()
             brace_pos = response.find('{', fence_start)
             bracket_pos = response.find('[', fence_start)
-            open_char = None
-            close_char = None
 
             if brace_pos != -1 and (bracket_pos == -1 or brace_pos < bracket_pos):
-                start_pos = brace_pos
-                open_char, close_char = '{', '}'
+                start_pos, open_char, close_char = brace_pos, '{', '}'
             elif bracket_pos != -1:
-                start_pos = bracket_pos
-                open_char, close_char = '[', ']'
+                start_pos, open_char, close_char = bracket_pos, '[', ']'
             else:
                 continue
 
-            # Find the matching closing ``` after the JSON
             extracted = BaseAgent._extract_balanced(response, start_pos, open_char, close_char)
             if extracted is None:
                 continue
 
-            # Verify there's a closing ``` after the extracted JSON
-            end_pos = start_pos + len(extracted)
-            remaining = response[end_pos:].strip()
-            if remaining.startswith('```'):
+            # Only accept if the extracted block actually parses as JSON.
+            if _parses(extracted):
                 return extracted
-            # If no ``` found, still return if it looks like valid JSON
-            try:
-                json.loads(extracted)
-                return extracted
-            except json.JSONDecodeError:
-                continue
 
         return None
+
+    @staticmethod
+    def _find_first_parsable_block(response: str) -> Optional[str]:
+        """Scan all { and [ positions; return the first balanced block that
+        parses as JSON/JSON5. Falls back to the first balanced block if none
+        parse (so _repair_json still gets a chance downstream)."""
+        def _parses(text: str) -> bool:
+            try:
+                json.loads(text)
+                return True
+            except Exception:
+                pass
+            try:
+                import json5
+                json5.loads(text)
+                return True
+            except Exception:
+                return False
+
+        first_block: Optional[str] = None
+        for idx, ch in enumerate(response):
+            if ch == '{':
+                block = BaseAgent._extract_balanced(response, idx, '{', '}')
+            elif ch == '[':
+                block = BaseAgent._extract_balanced(response, idx, '[', ']')
+            else:
+                continue
+            if not block:
+                continue
+            if first_block is None:
+                first_block = block
+            if _parses(block):
+                return block
+        return first_block
 
     @staticmethod
     def _extract_balanced(text: str, start: int, open_char: str, close_char: str) -> Optional[str]:

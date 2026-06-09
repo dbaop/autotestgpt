@@ -5,7 +5,13 @@ Flow routes.
 from flask import jsonify, request
 
 from service.errors import AppError
-from service.flow_service import get_flow_status, resume_flow, retry_script, start_flow
+from service.flow_service import (
+    get_flow_status,
+    request_cancel,
+    resume_flow,
+    retry_script,
+    start_flow,
+)
 
 
 def start_test_flow():
@@ -37,3 +43,13 @@ def retry_test_script(script_id: int):
         return jsonify(retry_script(script_id))
     except AppError as e:
         return jsonify(e.to_dict()), e.status_code
+
+
+def cancel_test_flow(req_id: int):
+    """Request cooperative cancellation of a running flow."""
+    request_cancel(req_id)
+    return jsonify({
+        "message": "Cancellation requested",
+        "requirement_id": req_id,
+        "status": "cancelling",
+    }), 202

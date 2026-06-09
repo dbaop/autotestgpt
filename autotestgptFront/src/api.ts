@@ -176,7 +176,7 @@ export type SSEEventType =
   | 'connected' | 'heartbeat'
   | 'message' | 'tool_call' | 'tool_result'
   | 'question' | 'artifact' | 'phase_change'
-  | 'error' | 'done'
+  | 'error' | 'done' | 'stopped'
 
 export interface SSEEvent {
   type: SSEEventType
@@ -283,6 +283,7 @@ export const healthApi = {
 export const flowApi = {
   start: (payload: FlowStartPayload) => api.post<FlowStartResponse>('/flow/start', payload),
   resume: (requirementId: number) => api.post<FlowResumeResponse>(`/flow/resume/${requirementId}`),
+  cancel: (requirementId: number) => api.post<{ message: string; requirement_id: number; status: string }>(`/flow/cancel/${requirementId}`),
   status: (requirementId: number) => api.get<{ requirement_id: number; db_status: string; flow_status: string; execution_progress: any }>(`/flow/status/${requirementId}`),
   retryScript: (scriptId: number) => api.post<{ message: string; script_id: number; status: string; execution_time: number; error?: string }>(`/flow/retry-script/${scriptId}`),
 }

@@ -174,8 +174,28 @@ class CodeAgent(ToolCapableAgent):
     ) -> Generator[Dict[str, Any], Optional[str], None]:
         """Interactive code generation with knowledge search and file reading."""
         tools_prompt = format_tools_prompt(self._tools)
-        system_prompt = self.api_test_prompt + "\n\n" + tools_prompt
-        full_system = system_instruction or system_prompt
+        # IMPORTANT: combine (not replace) the strict JSON/dsl contract with the
+        # orchestrator-provided instruction (page_map / env). Replacing it with
+        # system_instruction alone made the model return prose + ```javascript
+        # blocks instead of the required {"scripts":[...]} JSON envelope.
+        hard_rule = (
+            "\n\nHARD OUTPUT RULES (must follow):\n"
+            "- Return ONLY a single JSON object of the form {\"scripts\": [...]}. "
+            "No prose, no explanation, no markdown headings outside the JSON.\n"
+            "- The Playwright script goes INSIDE the JSON `code` string field — "
+            "do NOT emit a ```javascript or ```python code block.\n"
+            "- Use Python Playwright (playwright.sync_api), NOT JavaScript/Node "
+            "(no require('@playwright/test')).\n"
+            "- For UI cases, also include the `dsl` object (given/when/then)."
+        )
+        full_system = (
+            self.ui_test_prompt
+            + "\n\n"
+            + (system_instruction or "")
+            + "\n\n"
+            + tools_prompt
+            + hard_rule
+        )
 
         yield from super().act(conversation_messages, full_system)
 

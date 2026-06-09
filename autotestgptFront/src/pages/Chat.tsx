@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { ChatAgentContext, conversationsApi, Conversation, Message, SSEEvent } from '../api'
+import { ChatAgentContext, conversationsApi, Conversation, Message, SSEEvent, flowApi } from '../api'
 
 const C = {
   bg: 'var(--bg-card)',
@@ -59,6 +59,7 @@ export default function Chat() {
   const [currentPhase, setCurrentPhase] = useState('')
   const [toolCalls, setToolCalls] = useState<{ name: string; result?: any; active: boolean }[]>([])
   const [activeQuestion, setActiveQuestion] = useState<{ question: string; context: string } | null>(null)
+  const [cancelling, setCancelling] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const initializedRef = useRef(false)
   const sendingRef = useRef(false)
@@ -125,12 +126,18 @@ export default function Chat() {
           case 'phase_change':
             setCurrentPhase(data.to || '')
             break
+          case 'stopped':
+            setCancelling(false)
+            setLoading(false)
+            setCurrentPhase('')
+            break
           case 'error':
             console.error('SSE error event:', data.message)
             setLoading(false)
             break
           case 'done':
             setLoading(false)
+            setCancelling(false)
             setStreamingContent('')
             // Reload full message list
             if (currentConv?.id) loadMessages(currentConv.id)
@@ -230,6 +237,17 @@ export default function Chat() {
         contextPollRef.current = window.setInterval(() => loadAgentContext(id), 5000)
       }
     } catch { console.error('加载对话失败') }
+  }
+
+  const handleCancel = async () => {
+    const reqId = currentConv?.requirement_id
+    if (!reqId || cancelling) return
+    setCancelling(true)
+    try {
+      await flowApi.cancel(reqId)
+    } catch {
+      setCancelling(false)
+    }
   }
 
   const doSendMessage = async () => {
@@ -693,20 +711,32 @@ export default function Chat() {
                     opacity: (loading || sendingRef.current) ? 0.5 : 1,
                   }}
                 />
-                <button type="button" onClick={doSendMessage} disabled={loading || sendingRef.current} style={{
-                  fontFamily: C.mono, fontSize: 12, fontWeight: 700, color: '#050810',
-                  background: 'linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald))',
-                  padding: '12px 20px', borderRadius: 12, border: 'none', cursor: 'pointer',
-                  transition: 'all 0.2s ease', opacity: (loading || sendingRef.current) ? 0.5 : 1,
-                }}
-                  onMouseEnter={e => !(loading || sendingRef.current) && (e.currentTarget.style.transform = 'translateY(-1px)')}
-                  onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}>
-                  发送
-                </button>
+                {(loading || !!currentPhase) && currentConv?.requirement_id ? (
+                  <button type="button" onClick={handleCancel} disabled={cancelling} style={{
+                    fontFamily: C.mono, fontSize: 12, fontWeight: 700, color: '#fff',
+                    background: cancelling ? 'rgba(220,38,38,0.5)' : 'var(--accent-rose, #dc2626)',
+                    padding: '12px 18px', borderRadius: 12, border: 'none',
+                    cursor: cancelling ? 'default' : 'pointer', transition: 'all 0.2s ease',
+                  }}>
+                    {cancelling ? '正在终止…' : '⛔ 终止'}
+                  </button>
+                ) : (
+                  <button type="button" onClick={doSendMessage} disabled={loading || sendingRef.current} style={{
+                    fontFamily: C.mono, fontSize: 12, fontWeight: 700, color: '#050810',
+                    background: 'linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald))',
+                    padding: '12px 20px', borderRadius: 12, border: 'none', cursor: 'pointer',
+                    transition: 'all 0.2s ease', opacity: (loading || sendingRef.current) ? 0.5 : 1,
+                  }}
+                    onMouseEnter={e => !(loading || sendingRef.current) && (e.currentTarget.style.transform = 'translateY(-1px)')}
+                    onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}>
+                    发送
+                  </button>
+                )}
               </div>
 
               <p style={{ margin: '12px 0 0', fontSize: 11, color: C.text3, paddingLeft: 4 }}>
-                输入需求后，Agent 会自动补齐信息并启动测试；完整事件与产物请在工作台查看。
+                输入需求后，Agent 会自动补齐信息并启动测试；运行中可点「⛔ 终止」停止。
+                测试地址填错时，发一条「测试地址 http://...」即可中途修改（会先停下，回复「继续」从当前阶段继续）。
               </p>
             </div>
           </>

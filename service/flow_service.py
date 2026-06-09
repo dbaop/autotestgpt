@@ -20,6 +20,28 @@ _executor = ThreadPoolExecutor(max_workers=4)
 _flow_registry: dict[int, dict[str, Any]] = {}
 _registry_lock = threading.Lock()
 
+# Cooperative cancellation: requirement_ids the user requested to stop.
+_cancel_requests: set[int] = set()
+_cancel_lock = threading.Lock()
+
+
+def request_cancel(requirement_id: int) -> None:
+    """Mark a running flow for cooperative cancellation."""
+    with _cancel_lock:
+        _cancel_requests.add(requirement_id)
+
+
+def is_cancelled(requirement_id: int) -> bool:
+    """Whether a cancellation was requested for this requirement."""
+    with _cancel_lock:
+        return requirement_id in _cancel_requests
+
+
+def clear_cancel(requirement_id: int) -> None:
+    """Clear any pending cancellation flag (called when a flow run ends)."""
+    with _cancel_lock:
+        _cancel_requests.discard(requirement_id)
+
 
 def _now():
     return datetime.now(timezone.utc)
@@ -135,6 +157,7 @@ def _run_orchestrator_in_thread(fn, conversation_id: int, requirement_id: int):
             except Exception:
                 pass
         finally:
+            clear_cancel(requirement_id)
             remove = getattr(db.session, "remove", None)
             if callable(remove):
                 remove()

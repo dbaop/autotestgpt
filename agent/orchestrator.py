@@ -157,6 +157,32 @@ class ConversationOrchestrator:
             yield from self._drive(conversation_id, requirement)
             return
 
+        # ---- C2：任意非 pending 状态下「中途修改测试环境（地址/账号）」 ----
+        # 跑中先停后改：识别到 test_url 等变更则请求取消正在执行的流程并更新环境，
+        # 不自动续跑；用户回复「继续」或点重跑从当前阶段继续（新地址生效）。
+        if requirement and requirement.status != "pending":
+            env_keys = self._try_save_env_from_message(requirement, user_message, conversation_id)
+            if env_keys:
+                from service.flow_service import request_cancel
+
+                request_cancel(requirement.id)
+                env = self._collect_env(requirement)
+                loc = f"（测试地址 {env.get('test_url')}）" if env.get("test_url") else ""
+                note = (
+                    f"已更新环境配置：{env_keys}{loc}。"
+                    "若有正在执行的流程会在当前步骤后停止；回复「继续」或点重跑即可从当前阶段继续（新配置生效）。"
+                )
+                m = Message(
+                    conversation_id=conversation_id, sender="router", content=note,
+                    agent_type="router",
+                    extra_data={"source": "env_update_midflow", "saved": env_keys},
+                )
+                db.session.add(m)
+                db.session.commit()
+                yield {"type": "message", "complete": True, "content": note}
+                yield {"type": "done"}
+                return
+
         # ---- 首次/常规：跑当前阶段的 agent，再交给 _drive 驱动到底 ----
         phase, agent_type = self._determine_phase(requirement_id, user_message)
 
@@ -193,6 +219,15 @@ class ConversationOrchestrator:
             yield {"type": "done"}
             return
 
+        # A fresh user-initiated drive clears any stale cancellation flag so a
+        # previous force-stop doesn't kill this new run immediately.
+        try:
+            from service.flow_service import clear_cancel
+
+            clear_cancel(requirement.id)
+        except Exception:
+            pass
+
         guard = 0
         while True:
             guard += 1
@@ -202,6 +237,11 @@ class ConversationOrchestrator:
 
             db.session.refresh(requirement)
             status = requirement.status
+
+            # Cooperative cancellation (force-stop button)
+            if self._is_cancelled(requirement.id):
+                yield from self._handle_cancel(conversation_id, requirement)
+                return
 
             # Terminal
             if status in ("completed", "error"):
@@ -251,6 +291,16 @@ class ConversationOrchestrator:
 
             db.session.refresh(requirement)
             if requirement.status == prev_status:
+                # CodeAgent failed to produce parsable scripts — synthesize a
+                # minimal fallback from the DB test cases so the flow proceeds
+                # (rather than dead-ending) instead of looping.
+                if agent_type == "code_agent" and prev_status == "cases_generated":
+                    if self._fallback_generate_scripts(requirement, conversation_id):
+                        yield {
+                            "type": "message", "complete": True,
+                            "content": "脚本生成未返回规范结果，已用最小可执行用例兜底，继续执行。",
+                        }
+                        continue
                 # Agent produced no advancing artifact — stop to avoid a loop
                 msg = "流程未能自动推进（未生成预期结果），请补充信息后再继续。"
                 self._save_agent_message(conversation_id, "router", msg)
@@ -368,6 +418,82 @@ class ConversationOrchestrator:
             db.session.add(ts)
         db.session.commit()
         logger.info("Saved %d ui_cdp DSL scripts for req %d", len(dsl_scripts), requirement_id)
+
+    def _fallback_generate_scripts(self, requirement: Requirement, conversation_id: int) -> bool:
+        """Synthesize minimal executable scripts from DB test cases when CodeAgent
+        failed to return a parsable JSON envelope. Returns True if scripts were
+        produced and status advanced to code_generated."""
+        from models import TestCase
+
+        cases = TestCase.query.filter_by(requirement_id=requirement.id).all()
+        if not cases:
+            return False
+
+        env = self._collect_env(requirement)
+        base_url = env.get("test_url", "")
+        scripts: List[Dict[str, Any]] = []
+        for case in cases:
+            sid = f"TC-{case.id}"
+            is_ui = (case.test_type or "").lower() == "ui"
+            if is_ui:
+                safe = sid.replace("-", "_")
+                code = (
+                    "from playwright.sync_api import Page\n\n"
+                    f"def test_{safe}(page: Page):\n"
+                    f"    page.goto({base_url!r} or 'about:blank')\n"
+                    "    assert page.locator('body').is_visible()\n"
+                )
+                dsl = {
+                    "given": {"action": "navigate", "url": base_url or "/"},
+                    "when": [],
+                    "then": [{"type": "element_visible", "selector": "body"}],
+                }
+                scripts.append({
+                    "id": sid, "title": case.title or sid, "language": "python",
+                    "framework": "playwright", "code": code, "dsl": dsl,
+                })
+            else:
+                safe = sid.replace("-", "_")
+                code = f"def test_{safe}():\n    assert True  # fallback placeholder\n"
+                scripts.append({
+                    "id": sid, "title": case.title or sid, "language": "python",
+                    "framework": "pytest", "code": code,
+                })
+
+        logger.warning(
+            "CodeAgent produced no parsable scripts for req %d — using fallback (%d cases)",
+            requirement.id, len(scripts),
+        )
+        # Reuse the standard persistence + status-advance path.
+        self._handle_artifact(requirement, "test_scripts", {"scripts": scripts}, conversation_id)
+        db.session.refresh(requirement)
+        return requirement.status == "code_generated"
+
+    # ------------------------------------------------------------------
+    # Cooperative cancellation
+    # ------------------------------------------------------------------
+
+    def _is_cancelled(self, requirement_id: int) -> bool:
+        try:
+            from service.flow_service import is_cancelled
+
+            return is_cancelled(requirement_id)
+        except Exception:
+            return False
+
+    def _handle_cancel(
+        self, conversation_id: int, requirement: Requirement
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Stop driving on user request. Leaves status resumable, clears flag."""
+        from service.flow_service import clear_cancel
+
+        self._active_generators.pop(requirement.id, None)
+        clear_cancel(requirement.id)
+        msg = "已按你的请求终止当前流程。可点重跑/回复『继续』从当前阶段继续。"
+        self._save_agent_message(conversation_id, "router", msg)
+        yield {"type": "message", "complete": True, "content": msg}
+        yield {"type": "stopped", "requirement_id": requirement.id}
+        yield {"type": "done"}
 
     def _collect_env(self, requirement: Requirement) -> Dict[str, Any]:
         progress = requirement.execution_progress or {}
@@ -540,6 +666,19 @@ class ConversationOrchestrator:
         executed = 0
 
         for idx, script in enumerate(scripts):
+            # Cooperative cancellation between scripts: keep finished records,
+            # skip the rest, leave status resumable.
+            if self._is_cancelled(requirement.id):
+                FlowDataAccess.set_execution_progress(
+                    requirement.id,
+                    {"total": total, "executed": executed, "cancelled": True,
+                     "end_time": _now().isoformat()},
+                )
+                msg = f"执行已被用户终止，已完成 {executed}/{total} 个脚本。可点重跑/回复『继续』从当前阶段继续。"
+                self._save_agent_message(conversation_id, "exec_agent", msg)
+                yield {"type": "message", "complete": True, "content": msg}
+                return
+
             is_ui = script.script_type == "ui_cdp"
             tool_name = "run_ui_dsl" if is_ui else "run_pytest"
             yield {
