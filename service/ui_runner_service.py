@@ -219,7 +219,12 @@ def run_ui_dsl(dsl: Dict[str, Any], base_url: str = "", screenshot_prefix: str =
             steps.append(_run_when_step(probe, step))
 
         # ---- Then: assertions ----
-        for assertion in dsl.get("then", []) or []:
+        then_list = dsl.get("then") or []
+        if not then_list:
+            # DSL defined no assertions — at least verify the page rendered so a
+            # navigate-only case is a meaningful smoke check instead of a false fail.
+            then_list = [{"type": "element_visible", "selector": "body"}]
+        for assertion in then_list:
             assertions.append(_run_assertion(probe, assertion))
 
         after = _capture_screenshot(probe, f"{screenshot_prefix}_after")
@@ -228,7 +233,7 @@ def run_ui_dsl(dsl: Dict[str, Any], base_url: str = "", screenshot_prefix: str =
 
         steps_ok = all(s.get("ok") for s in steps)
         asserts_ok = all(a.get("pass") for a in assertions)
-        passed = steps_ok and asserts_ok and bool(assertions)
+        passed = steps_ok and asserts_ok
         status = "success" if passed else "failed"
 
         error = None

@@ -226,6 +226,15 @@ class ExecAgent(ToolCapableAgent):
             if result.returncode == 0:
                 status = 'success'
                 error = None
+            elif parse_pytest and result.returncode == 5:
+                # pytest exit code 5 = no tests collected (script lacks a test_*
+                # function / isn't a valid pytest module). Make this explicit.
+                status = 'failed'
+                error = (
+                    "pytest 未收集到任何用例（返回码 5）。生成的脚本可能缺少 test_ 函数、"
+                    "不是 pytest 格式，或为说明文字/非 Python 代码。\n\n"
+                    f"[STDOUT]\n{result.stdout}"
+                )
             else:
                 status = 'failed'
                 error_parts = []

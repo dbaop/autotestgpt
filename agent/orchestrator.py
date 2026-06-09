@@ -253,6 +253,15 @@ class ConversationOrchestrator:
 
             # Confirmation gate after requirement parsing
             if status == "parsed" and not self._confirmation_done(requirement):
+                # Skip the gate when the user already provided everything up front
+                # (test_url + an explicit review decision) — avoids re-asking for
+                # info that was supplied in the New Test form.
+                if self._can_autoconfirm(requirement):
+                    self._mark_confirmed(requirement)
+                    note = "已使用你提交的环境/审查配置，直接开始执行。"
+                    self._save_agent_message(conversation_id, "router", note)
+                    yield {"type": "message", "complete": True, "content": note}
+                    continue
                 yield from self._emit_confirmation_gate(conversation_id, requirement)
                 return
 
@@ -536,6 +545,32 @@ class ConversationOrchestrator:
         if not isinstance(structured, dict):
             return False
         return structured.get("confirmation", {}).get("confirmed") is True
+
+    def _can_autoconfirm(self, requirement: Requirement) -> bool:
+        """True when env (test_url) and a review decision were already provided
+        up front, so the confirmation gate can be skipped."""
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            return False
+        env = self._collect_env(requirement)
+        review = structured.get("review") or {}
+        has_url = bool(env.get("test_url"))
+        review_decided = isinstance(review, dict) and ("enabled" in review)
+        return has_url and review_decided
+
+    def _mark_confirmed(self, requirement: Requirement):
+        from sqlalchemy.orm.attributes import flag_modified
+
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            structured = {}
+        confirmation = structured.get("confirmation") or {}
+        confirmation["confirmed"] = True
+        confirmation["auto"] = True
+        structured["confirmation"] = confirmation
+        requirement.structured_data = structured
+        flag_modified(requirement, "structured_data")
+        db.session.commit()
 
     def _emit_confirmation_gate(
         self, conversation_id: int, requirement: Requirement
