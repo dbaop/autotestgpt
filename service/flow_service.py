@@ -187,20 +187,12 @@ def start_flow(data: dict):
         }
 
     # 如果提供了文档 URL（钉钉/飞书/语雀等），通过 CDP 自动提取内容
-    if doc_url and not demand:
-        extracted = _extract_doc_from_url(doc_url)
-        if extracted:
-            demand = extracted["content"]
-            original_document = {
-                "url": doc_url,
-                "title": extracted.get("title", ""),
-                "extracted_content": demand,
-                "extracted_at": extracted.get("extracted_at"),
-            }
-        else:
-            # CDP 提取失败时，标记需要 retry
-            demand = f"请打开以下文档链接并提取测试需求:\n{doc_url}"
-            original_document = {"url": doc_url, "needs_retry": True}
+    is_doc_url_mode = bool(doc_url and not demand)
+    if is_doc_url_mode:
+        # 先创建占位需求立即返回，避免 CDP 提取阻塞 HTTP 响应。
+        # 提取在后台线程完成后再更新需求内容并启动 orchestrator。
+        demand = f"请打开以下文档链接并提取测试需求:\n{doc_url}"
+        original_document = {"url": doc_url, "needs_retry": True}
 
     if original_document:
         structured_seed["original_document"] = original_document
@@ -237,10 +229,50 @@ def start_flow(data: dict):
     if Config.CONVERSATION_FLOW_ENABLED:
         from agent.orchestrator import process_user_message_flow
 
-        def _fn():
-            return process_user_message_flow(conversation.id, demand)
+        if is_doc_url_mode:
+            # CDP extraction is slow (navigate + extract), so run it async.
+            # First create the requirement and return the response immediately;
+            # then extract in background, update the requirement, and start flow.
+            def _extract_then_start():
+                flask_app = _resolve_flask_app()
+                with flask_app.app_context():
+                    try:
+                        extracted = _extract_doc_from_url(doc_url)
+                        req = db.session.get(Requirement, requirement.id)
+                        if req and extracted:
+                            content = extracted["content"]
+                            req.raw_text = content
+                            req.description = content[:100] + "..." if len(content) > 100 else content
+                            sd = req.structured_data or {}
+                            sd["original_document"] = {
+                                "url": doc_url,
+                                "title": extracted.get("title", ""),
+                                "extracted_content": content,
+                                "extracted_at": extracted.get("extracted_at"),
+                            }
+                            req.structured_data = sd
+                            db.session.commit()
+                            logger.info("Async CDP extraction succeeded for req %d", requirement.id)
+                        elif req:
+                            db.session.commit()
+                            logger.warning("Async CDP extraction failed for req %d (doc_url=%s)", requirement.id, doc_url)
+                        # Use the updated demand from DB (or fallback to placeholder)
+                        updated_req = db.session.get(Requirement, requirement.id)
+                        updated_demand = updated_req.raw_text if updated_req else demand
+                        _fn = lambda: process_user_message_flow(conversation.id, updated_demand)
+                        _run_orchestrator_in_thread(_fn, conversation.id, requirement.id)
+                    except Exception as exc:
+                        logger.exception("Async CDP extraction + flow start failed: %s", exc)
+                        try:
+                            _fn = lambda: process_user_message_flow(conversation.id, demand)
+                            _run_orchestrator_in_thread(_fn, conversation.id, requirement.id)
+                        except Exception:
+                            pass
 
-        _executor.submit(_run_orchestrator_in_thread, _fn, conversation.id, requirement.id)
+            _executor.submit(_extract_then_start)
+        else:
+            _fn = lambda: process_user_message_flow(conversation.id, demand)
+            _executor.submit(_run_orchestrator_in_thread, _fn, conversation.id, requirement.id)
 
         return {
             "message": "Test flow started (orchestrator mode)",
@@ -427,19 +459,34 @@ def resume_flow(requirement_id: int):
 
 
 def retry_script(script_id: int):
+    import json
+
     script = db.session.get(TestScript, script_id)
     if not script:
         raise NotFoundError(f"Test script {script_id} not found")
 
-    exec_agent = ExecAgent()
-    result = exec_agent.process(
-        {
-            "script_id": script.id,
-            "script_content": script.script_content,
-            "file_path": script.file_path,
-            "script_type": script.script_type,
-        }
-    )
+    is_ui = script.script_type == "ui_cdp"
+    if is_ui:
+        # CDP / UI 脚本走 DSL 引擎，不走 pytest 子进程
+        from service.ui_runner_service import run_ui_dsl
+
+        dsl = json.loads(script.script_content or "{}")
+        # Resolve test_url from the requirement's structured_data
+        requirement = script.test_case.requirement if script.test_case else None
+        structured = requirement.structured_data or {} if requirement else {}
+        env = structured.get("test_environment") or {} if isinstance(structured, dict) else {}
+        base_url = env.get("test_url", "")
+        result = run_ui_dsl(dsl, base_url=base_url, screenshot_prefix=f"ui_{script.id}_retry")
+    else:
+        exec_agent = ExecAgent()
+        result = exec_agent.process(
+            {
+                "script_id": script.id,
+                "script_content": script.script_content,
+                "file_path": script.file_path,
+                "script_type": script.script_type,
+            }
+        )
     record = ExecutionRecord(
         test_script_id=script.id,
         status=result.get("status", "unknown"),

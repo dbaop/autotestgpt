@@ -181,7 +181,7 @@ export default function NewTest() {
     if (!canSubmit) { setError('请先补齐当前模式所需的信息。'); return }
     setLoading(true); setError('')
     try {
-      if (inputMode === 'text') await handleTextFlowStart()
+      if (inputMode === 'text' || inputMode === 'url') await handleTextFlowStart()
       else if (fileTarget === 'requirement') await handleRequirementFileImport()
       else await handleKnowledgeFileImport()
     } catch (err: any) { setError(err.response?.data?.message || err.response?.data?.error || '提交失败'); setLoading(false) }

@@ -596,9 +596,10 @@ class ConversationOrchestrator:
         else:
             review_line = "- 代码 review：默认不开启。如需要请回复「需要 review，仓库 <url> 分支 <branch>」。"
 
+        workbench_url = f"/workbench/{requirement.id}"
         question = (
             "需求已解析完成 ✅。开始自动生成用例与执行测试前，请确认以下信息"
-            "（可在一条消息里补全/修改，确认无误回复「确认」即可）：\n"
+            "（推荐前往 [Agent 工作台](" + workbench_url + ") 补充，也可以在本对话中补全/修改，确认无误回复「确认」即可）：\n"
             f"{url_line}\n{login_line}\n{review_line}"
         )
 
@@ -1321,6 +1322,20 @@ class ConversationOrchestrator:
                 requirement.structured_data = structured
                 flag_modified(requirement, "structured_data")
                 db.session.commit()
+            elif artifact_key == "structured_requirement":
+                structured = requirement.structured_data or {}
+                if not isinstance(structured, dict):
+                    structured = {}
+                structured["structured_requirement"] = artifact_data
+                # Sync title/description from parsed result for display in lists
+                if artifact_data.get("title"):
+                    requirement.title = artifact_data["title"]
+                if artifact_data.get("description"):
+                    requirement.description = artifact_data["description"]
+                requirement.structured_data = structured
+                flag_modified(requirement, "structured_data")
+                db.session.commit()
+                logger.info("Saved structured requirement for req %d", requirement.id)
         except Exception as exc:
             logger.error("Failed to persist artifact %s: %s", artifact_key, exc)
             db.session.rollback()

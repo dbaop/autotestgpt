@@ -4,7 +4,16 @@ Requirement application service.
 
 from datetime import datetime, timezone
 
-from models import Requirement, TestCase, db
+from models import (
+    AgentEvent,
+    Conversation,
+    DefectCandidate,
+    FinalReport,
+    FixSuggestion,
+    Requirement,
+    TestCase,
+    db,
+)
 from service.errors import NotFoundError, ValidationError
 
 
@@ -94,5 +103,19 @@ def update_requirement(req_id: int, data: dict):
 
 def delete_requirement(req_id: int):
     requirement = get_requirement_or_404(req_id)
+
+    # Delete dependent rows that aren't covered by ORM cascade.
+    # Order matters: FixSuggestion depends on DefectCandidate, so delete it first.
+    FixSuggestion.query.filter_by(requirement_id=req_id).delete()
+    AgentEvent.query.filter_by(requirement_id=req_id).delete()
+    FinalReport.query.filter_by(requirement_id=req_id).delete()
+    DefectCandidate.query.filter_by(requirement_id=req_id).delete()
+    # Conversation.requirement_id is nullable; we delete the conversation (and
+    # its messages cascade) since it was auto-created for this requirement.
+    Conversation.query.filter_by(requirement_id=req_id).delete()
+    # TestCase cascades via Requirement.test_cases (cascade='all, delete-orphan'),
+    # but we flush first to avoid any FK ordering surprises.
+    db.session.flush()
+
     db.session.delete(requirement)
     db.session.commit()
