@@ -275,8 +275,20 @@ class BaseAgent(ABC):
                     return result
                 except json.JSONDecodeError:
                     pass
-            logger.error(f"JSON解析失败: {e}, 响应内容前500字符: {response[:500]}...")
-            raise ValueError(f"无法解析模型响应为JSON: {e}")
+            # 解析彻底失败时，不抛异常阻塞流程；返回一个包含原始文本的
+            # fallback dict，让上游（orchestrator / router）能拿到 agent 的
+            # 实际回复并将其作为消息展示给用户，避免流程直接跳到 error 状态。
+            logger.warning(
+                "JSON解析彻底失败（%s），返回 fallback 结构。响应前500字符: %s",
+                e, response[:300]
+            )
+            fallback_text = response[:2000].strip()
+            return {
+                "status": "agent_fallback",
+                "raw_response": fallback_text,
+                "message": fallback_text,
+                "error": f"无法解析模型响应为JSON: {e}",
+            }
 
     @staticmethod
     def _repair_json(text: str) -> Optional[str]:

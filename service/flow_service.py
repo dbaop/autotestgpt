@@ -99,34 +99,66 @@ def execute_flow_async(flow, flow_data, requirement_id):
 # Document extraction
 # ---------------------------------------------------------------------------
 
-def _extract_doc_from_url(url: str) -> dict | None:
-    """Try to extract document content from *url* via CDP browser probe."""
-    try:
-        from service.browser_probe_service import get_browser_probe
-        probe = get_browser_probe()
-        nav = probe.navigate(url)
-        if not nav.get("ok"):
-            logger.warning("CDP navigate failed for %s: %s", url, nav.get("error", "unknown"))
-            return None
-        result = probe.extract_content()
-        if result.get("ok") and result.get("length", 0) > 50:
-            logger.info("CDP extracted %d chars from %s", result["length"], url)
-            content = (
-                f"【来源】{result.get('url', url)}\n"
-                f"【标题】{result.get('title', '')}\n\n"
-                f"{result.get('content', '')}"
-            )
-            return {
-                "content": content,
-                "url": url,
-                "title": result.get("title", ""),
-                "extracted_at": _now().isoformat(),
-            }
-        logger.warning("CDP extracted too little content from %s: %d chars", url, result.get("length", 0))
-        return None
-    except Exception as exc:
-        logger.warning("CDP extraction failed for %s: %s", url, exc)
-        return None
+def _extract_doc_from_url(url: str, retries: int = 3) -> dict | None:
+    """Try to extract document content from *url* via CDP browser probe.
+
+    Retries on failure with increasing wait between attempts, and waits for
+    the CDP Bridge MCP server to be ready if applicable.
+    """
+    import time as _time
+
+    from service.browser_probe_service import get_browser_probe
+
+    last_error = None
+    for attempt in range(retries):
+        try:
+            # Wait a bit for MCP / CDP backends to be ready (especially on first attempt
+            # when the background thread fires immediately after app startup).
+            if attempt > 0:
+                wait = 1.5 * (attempt + 1)
+                logger.info("CDP extraction retry %d/%d for %s after %.1fs",
+                            attempt + 1, retries, url, wait)
+                _time.sleep(wait)
+
+            probe = get_browser_probe()
+            # Force re-connect on retry so we try fresh backends each time
+            if attempt > 0:
+                probe.disconnect()
+
+            nav = probe.navigate(url)
+            if not nav.get("ok"):
+                last_error = nav.get("error", "unknown")
+                logger.warning("CDP navigate failed for %s (attempt %d/%d): %s",
+                               url, attempt + 1, retries, last_error)
+                continue
+
+            result = probe.extract_content()
+            if result.get("ok") and result.get("length", 0) > 50:
+                logger.info("CDP extracted %d chars from %s (attempt %d)",
+                            result["length"], url, attempt + 1)
+                content = (
+                    f"【来源】{result.get('url', url)}\n"
+                    f"【标题】{result.get('title', '')}\n\n"
+                    f"{result.get('content', '')}"
+                )
+                return {
+                    "content": content,
+                    "url": url,
+                    "title": result.get("title", ""),
+                    "extracted_at": _now().isoformat(),
+                }
+
+            last_error = f"Content too short: {result.get('length', 0)} chars"
+            logger.warning("CDP extracted too little content from %s (attempt %d/%d): %d chars",
+                           url, attempt + 1, retries, result.get("length", 0))
+        except Exception as exc:
+            last_error = str(exc)
+            logger.warning("CDP extraction failed for %s (attempt %d/%d): %s",
+                           url, attempt + 1, retries, exc)
+
+    logger.error("CDP extraction exhausted all %d retries for %s. Last error: %s",
+                 retries, url, last_error)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +378,37 @@ def get_flow_status(requirement_id: int):
         "flow_status": flow_info.get("status", "unknown"),
         "execution_progress": requirement.execution_progress,
     }
+
+
+# ---------------------------------------------------------------------------
+# confirm_case_review — mark case review gate confirmed & resume
+# ---------------------------------------------------------------------------
+
+
+def confirm_case_review(requirement_id: int):
+    """Mark the case review confirmation as done and resume the flow.
+
+    Called from the frontend TestCases page when the user clicks
+    「确认并继续」after reviewing/editing test cases.
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+
+    requirement = db.session.get(Requirement, requirement_id)
+    if not requirement:
+        raise NotFoundError(f"Requirement {requirement_id} not found")
+
+    structured = requirement.structured_data or {}
+    if not isinstance(structured, dict):
+        structured = {}
+    crc = structured.get("case_review_confirmation") or {}
+    crc["confirmed"] = True
+    structured["case_review_confirmation"] = crc
+    requirement.structured_data = structured
+    flag_modified(requirement, "structured_data")
+    db.session.commit()
+
+    # Resume the flow so the orchestrator picks up the confirmed gate
+    return resume_flow(requirement_id)
 
 
 def resume_flow(requirement_id: int):

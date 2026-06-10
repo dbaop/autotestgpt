@@ -36,7 +36,7 @@ STATUS_TO_PHASE: Dict[str, Tuple[str, str]] = {
     "pending": ("parsing", "req_agent"),
     "parsed": ("confirming", ""),
     "probed": ("designing_cases", "case_agent"),
-    "cases_generated": ("generating_code", "code_agent"),
+    "cases_generated": ("reviewing_cases", ""),   # 暂停等待用户审阅后确认
     "code_generated": ("executing", ""),
     "executing": ("executing", ""),
     "executed": ("finalizing", ""),
@@ -123,6 +123,18 @@ class ConversationOrchestrator:
             and not self._confirmation_done(requirement)
         ):
             self._parse_confirmation_reply(requirement, user_message, conversation_id)
+            self._clear_waiting(requirement_id)
+            yield from self._drive(conversation_id, requirement)
+            return
+
+        # ---- Case review gate 回复：用户确认用例，进入代码生成 ----
+        if (
+            requirement
+            and requirement.status == "cases_generated"
+            and self._case_review_gate_emitted(requirement)
+            and not self._case_review_gate_done(requirement)
+        ):
+            self._parse_case_review_reply(requirement, user_message, conversation_id)
             self._clear_waiting(requirement_id)
             yield from self._drive(conversation_id, requirement)
             return
@@ -265,6 +277,11 @@ class ConversationOrchestrator:
                 yield from self._emit_confirmation_gate(conversation_id, requirement)
                 return
 
+            # Case review gate: let user review/edit test cases before code gen
+            if status == "cases_generated" and not self._case_review_gate_done(requirement):
+                yield from self._emit_case_review_gate(conversation_id, requirement)
+                return
+
             # Deterministic test execution
             if status in ("code_generated", "executing"):
                 yield from self._run_execution(conversation_id, requirement)
@@ -278,6 +295,8 @@ class ConversationOrchestrator:
             # Select the agent for this phase
             if status == "parsed" and self._confirmation_done(requirement):
                 phase, agent_type = ("exploring", "browser_agent")
+            elif status == "cases_generated" and self._case_review_gate_done(requirement):
+                phase, agent_type = ("generating_code", "code_agent")
             else:
                 phase, agent_type = STATUS_TO_PHASE.get(status, ("", ""))
 
@@ -665,6 +684,116 @@ class ConversationOrchestrator:
         logger.info("Confirmation parsed for req %d: review=%s", requirement.id, review)
 
     # ------------------------------------------------------------------
+    # Case review gate — user reviews generated test cases before code gen
+    # ------------------------------------------------------------------
+
+    def _case_review_gate_emitted(self, requirement: Requirement) -> bool:
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            return False
+        return bool(structured.get("case_review_confirmation", {}).get("emitted"))
+
+    def _case_review_gate_done(self, requirement: Requirement) -> bool:
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            return False
+        return bool(structured.get("case_review_confirmation", {}).get("confirmed"))
+
+    def _mark_case_review_confirmed(self, requirement: Requirement):
+        from sqlalchemy.orm.attributes import flag_modified
+
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            structured = {}
+        crc = structured.get("case_review_confirmation") or {}
+        crc["confirmed"] = True
+        structured["case_review_confirmation"] = crc
+        requirement.structured_data = structured
+        flag_modified(requirement, "structured_data")
+        db.session.commit()
+        logger.info("Case review confirmed for req %d", requirement.id)
+
+    def _emit_case_review_gate(
+        self, conversation_id: int, requirement: Requirement
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Pause the workflow so the user can review/edit test cases."""
+        from sqlalchemy.orm.attributes import flag_modified
+        from models import TestCase
+
+        cases = TestCase.query.filter_by(requirement_id=requirement.id).all()
+        case_count = len(cases)
+        api_count = sum(1 for c in cases if (c.test_type or "").lower() == "api")
+        ui_count = sum(1 for c in cases if (c.test_type or "").lower() == "ui")
+
+        case_list_lines = []
+        for c in cases[:15]:
+            mtag = (
+                f" [{c.methodology}]"
+                if getattr(c, "methodology", None) else ""
+            )
+            case_list_lines.append(
+                f"- **{c.title}** (type={c.test_type}, priority={c.priority}){mtag}"
+            )
+        if len(cases) > 15:
+            case_list_lines.append(f"  ... 共 {len(cases)} 个用例")
+
+        case_list_text = (
+            "\n".join(case_list_lines) if case_list_lines else "（无用例）"
+        )
+
+        workbench_url = f"/cases?requirement_id={requirement.id}"
+        question = (
+            "## 测试用例已生成 :white_check_mark:\n\n"
+            f"共生成 **{case_count}** 个测试用例"
+            f"（API: {api_count}, UI: {ui_count}）。\n\n"
+            "**当前仅执行 UI 测试**，API 用例将被跳过。\n\n"
+            f":point_right: [**点击进入用例管理页修改**]({workbench_url})"
+            "，可在页面中编辑/删除/添加用例。\n\n"
+            "修改完成后回到此处回复「**确认**」继续后续步骤。\n"
+            "无需修改也可直接回复「确认」跳过编辑。"
+        )
+
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            structured = {}
+        crc = structured.get("case_review_confirmation") or {}
+        crc["emitted"] = True
+        structured["case_review_confirmation"] = crc
+        requirement.structured_data = structured
+        flag_modified(requirement, "structured_data")
+        db.session.commit()
+
+        event = {
+            "type": "question",
+            "question": question,
+            "context": "reviewing_cases",
+        }
+        self._handle_question(requirement, "reviewing_cases", "router", [], event)
+        self._save_agent_message(conversation_id, "router", question)
+        yield event
+        yield {"type": "done"}
+
+    def _parse_case_review_reply(
+        self, requirement: Requirement, user_message: str, conversation_id: int
+    ):
+        """Parse the user's gate reply — only handles confirmation.
+        Case editing happens on the dedicated TestCases page, not in chat.
+        """
+        import re
+
+        msg = user_message.strip()
+        if re.search(
+            r"^(确认|ok|yes|继续|开始|执行|go|proceed|确定)\b",
+            msg, re.IGNORECASE,
+        ):
+            self._mark_case_review_confirmed(requirement)
+            return
+
+        # Default: treat anything else as confirmation (user may have
+        # typed free-form acknowledgement after editing on the page)
+        self._mark_case_review_confirmed(requirement)
+
+    # ------------------------------------------------------------------
     # Deterministic execution
     # ------------------------------------------------------------------
 
@@ -682,12 +811,14 @@ class ConversationOrchestrator:
             env = self._collect_env(requirement)
 
         all_scripts = FlowDataAccess.get_scripts_for_requirement(requirement.id)
-        # UI cases produce a paired (playwright deliverable, ui_cdp executable).
-        # Skip the Playwright deliverable when its ui_cdp sibling exists.
+        # After case review gate, only UI (ui_cdp) scripts should be executed.
+        # API tests are skipped at this stage.  Filter out Playwright/python
+        # deliverables and keep only the executable CDP DSL scripts.
         ui_cdp_case_ids = {s.test_case_id for s in all_scripts if s.script_type == "ui_cdp"}
         scripts = [
             s for s in all_scripts
-            if not (s.script_type == "playwright" and s.test_case_id in ui_cdp_case_ids)
+            if s.script_type == "ui_cdp"
+            or (s.script_type not in ("playwright", "python") and s.test_case_id not in ui_cdp_case_ids)
         ]
         if not scripts:
             FlowDataAccess.update_requirement(requirement.id, status="executed")
@@ -918,10 +1049,136 @@ class ConversationOrchestrator:
             history.append({"role": role, "content": msg.content})
         return history
 
+    # ------------------------------------------------------------------
+    # Phase memory summary — inject prior-phase context into every agent
+    # ------------------------------------------------------------------
+
+    def _build_phase_memory_summary(self, requirement: Optional[Requirement],
+                                     current_phase: str) -> str:
+        """Build a structured summary of all prior phase outputs.
+
+        Uses requirement.structured_data as the memory backbone so every agent
+        gets a tailored view of what earlier phases produced, regardless of
+        conversation history truncation.
+        """
+        if not requirement or not isinstance(requirement.structured_data, dict):
+            return ""
+
+        sd = requirement.structured_data
+        parts = []
+
+        # --- structured_requirement summary ---
+        # Useful for BrowserAgent, CaseAgent, CodeAgent
+        sr = sd.get("structured_requirement")
+        if sr and isinstance(sr, dict):
+            lines = ["## Prior Phase: Structured Requirement"]
+            if sr.get("title"):
+                lines.append(f"- Title: {sr.get('title')}")
+            if sr.get("description"):
+                lines.append(
+                    f"- Description: {sr.get('description', '')[:500]}"
+                )
+            modules = sr.get("business_modules") or []
+            if modules:
+                names = ", ".join(m.get("name", "") for m in modules[:10])
+                lines.append(f"- Business Modules ({len(modules)}): {names}")
+            interfaces = sr.get("interfaces") or []
+            if interfaces:
+                items = ", ".join(
+                    f"{i.get('method','')} {i.get('endpoint','')}"
+                    for i in interfaces[:10]
+                )
+                lines.append(f"- Interfaces ({len(interfaces)}): {items}")
+            ui_els = sr.get("ui_elements") or []
+            if ui_els:
+                names = ", ".join(e.get("name", "") for e in ui_els[:15])
+                lines.append(f"- UI Elements ({len(ui_els)}): {names}")
+            test_points = sr.get("test_points") or []
+            if test_points:
+                lines.append(f"- Test Points: {len(test_points)} identified")
+            parts.append("\n".join(lines))
+
+        # --- page_map summary ---
+        # Useful for CaseAgent, CodeAgent
+        pm = sd.get("page_map")
+        if pm and isinstance(pm, dict):
+            lines = ["## Prior Phase: Page Map (UI Exploration)"]
+            if pm.get("base_url"):
+                lines.append(f"- Base URL: {pm.get('base_url')}")
+            pages = pm.get("pages") or []
+            lines.append(f"- Pages: {len(pages)}")
+            for p in pages[:5]:
+                title = p.get("title") or p.get("route") or "?"
+                n_el = len(p.get("elements") or [])
+                lines.append(f"  - {title}: {n_el} elements")
+            flows = pm.get("flows") or []
+            if flows:
+                lines.append(f"- Flows: {len(flows)}")
+                for f in flows[:5]:
+                    lines.append(
+                        f"  - {f.get('name','?')}: "
+                        f"{len(f.get('steps',[]))} steps"
+                    )
+            parts.append("\n".join(lines))
+
+        # --- test_cases summary ---
+        # Useful for CodeAgent, execution, reviewing
+        if current_phase in ("generating_code", "executing", "reviewing"):
+            try:
+                from models import TestCase
+
+                cases = TestCase.query.filter_by(
+                    requirement_id=requirement.id
+                ).all()
+            except Exception:
+                cases = []
+
+            if cases:
+                lines = ["## Prior Phase: Generated Test Cases"]
+                lines.append(f"- Total: {len(cases)}")
+                type_counts = {}
+                for c in cases:
+                    t = c.test_type or "api"
+                    type_counts[t] = type_counts.get(t, 0) + 1
+                lines.append(f"- By type: {type_counts}")
+                lines.append("- Cases:")
+                for c in cases[:20]:
+                    mtag = (
+                        f" [{c.methodology}]"
+                        if getattr(c, "methodology", None) else ""
+                    )
+                    lines.append(
+                        f"  - {c.title} "
+                        f"(type={c.test_type}, priority={c.priority}){mtag}"
+                    )
+                if len(cases) > 20:
+                    lines.append(f"  ... and {len(cases) - 20} more")
+                parts.append("\n".join(lines))
+
+        if not parts:
+            return ""
+
+        header = (
+            "=== PRIOR PHASE SUMMARIES (structured memory — use this for "
+            "context; it supplements the conversation history below) ==="
+        )
+        return header + "\n\n" + "\n\n".join(parts) + "\n\n"
+
+    # ------------------------------------------------------------------
+    # System instruction builder
+    # ------------------------------------------------------------------
+
     def _build_system_instruction(self, phase: str,
                                    requirement: Optional[Requirement]) -> str:
         """Build the system instruction for the current phase."""
-        base = f"Current phase: {phase}. "
+        base = ""
+
+        # Inject shared memory summary BEFORE phase-specific instructions
+        memory = self._build_phase_memory_summary(requirement, phase)
+        if memory:
+            base += memory
+
+        base += f"Current phase: {phase}. "
 
         if requirement:
             base += f"Requirement ID: {requirement.id}. Status: {requirement.status}. "
@@ -987,10 +1244,11 @@ class ConversationOrchestrator:
             base += (
                 "Your task is to generate executable test scripts based on the test cases "
                 "and the page_map (real DOM selectors). "
-                "For UI test cases, each script object MUST include BOTH a Playwright `code` "
+                "**CRITICAL: Only generate scripts for UI test cases (test_type='ui'). "
+                "Skip ALL API test cases entirely — they will NOT be executed at this stage.** "
+                "For each UI test case, include BOTH a Playwright `code` "
                 "(deliverable) AND a Given-When-Then `dsl` object (executed in a real browser "
                 "via CDP). Every selector MUST come from the page_map below — do NOT guess. "
-                "For API test cases, generate a pytest `code` as usual. "
                 "Use get_requirement_environment first to check for saved URLs/credentials. "
                 "Only ask the user for URLs or credentials if get_requirement_environment returns empty."
             )
@@ -1309,6 +1567,28 @@ class ConversationOrchestrator:
             elif artifact_key == "test_scripts":
                 scripts = (artifact_data or {}).get("scripts", [])
                 if scripts:
+                    # After case review gate, only persist scripts for UI test cases
+                    # (CodeAgent may still return API scripts if it ignores instructions)
+                    try:
+                        from models import TestCase as _TC
+                        ui_case_titles = {
+                            c.title
+                            for c in _TC.query.filter_by(
+                                requirement_id=requirement.id
+                            ).all()
+                            if (c.test_type or "").lower() == "ui"
+                        }
+                        if ui_case_titles:
+                            scripts = [
+                                s for s in scripts
+                                if s.get("id") and s["id"] in ui_case_titles
+                            ]
+                            logger.info(
+                                "Filtered scripts to %d UI-only for req %d",
+                                len(scripts), requirement.id,
+                            )
+                    except Exception:
+                        pass  # non-fatal; save whatever CodeAgent returned
                     # Playwright/pytest scripts (deliverables + API executables)
                     FlowDataAccess.save_scripts(scripts, requirement.id)
                     # UI cases additionally get an executable ui_cdp DSL row

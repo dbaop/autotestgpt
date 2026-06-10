@@ -29,6 +29,7 @@ export interface TestCase {
   description: string
   test_type: 'api' | 'ui' | 'performance' | 'security'
   priority: 'high' | 'medium' | 'low'
+  methodology?: string  // boundary_value / equivalence_partitioning / error_guessing / state_transition / decision_table / pairwise
   steps: any[]
   expected_results: any
   created_at: string
@@ -284,6 +285,7 @@ export const flowApi = {
   start: (payload: FlowStartPayload) => api.post<FlowStartResponse>('/flow/start', payload),
   resume: (requirementId: number) => api.post<FlowResumeResponse>(`/flow/resume/${requirementId}`),
   cancel: (requirementId: number) => api.post<{ message: string; requirement_id: number; status: string }>(`/flow/cancel/${requirementId}`),
+  confirmCases: (requirementId: number) => api.post<FlowResumeResponse>(`/flow/confirm-cases/${requirementId}`),
   status: (requirementId: number) => api.get<{ requirement_id: number; db_status: string; flow_status: string; execution_progress: any }>(`/flow/status/${requirementId}`),
   retryScript: (scriptId: number) => api.post<{ message: string; script_id: number; status: string; execution_time: number; error?: string }>(`/flow/retry-script/${scriptId}`),
 }
@@ -308,6 +310,12 @@ export const casesApi = {
       params: requirementId ? { requirement_id: requirementId } : undefined,
     }),
   get: (id: number) => api.get<TestCase>(`/cases/${id}`),
+  update: (id: number, data: Partial<TestCase>) =>
+    api.put<{ message: string; test_case: TestCase }>(`/cases/${id}`, data),
+  delete: (id: number) =>
+    api.delete<{ message: string; case_id: number }>(`/cases/${id}`),
+  create: (data: Partial<TestCase> & { requirement_id: number }) =>
+    api.post<{ message: string; test_case: TestCase }>('/cases', data),
 }
 
 export const executionsApi = {

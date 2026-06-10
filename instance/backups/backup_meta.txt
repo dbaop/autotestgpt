@@ -1,3 +1,3 @@
-backup_at=2026-06-09T08:36:29.902543+00:00
-total_rows=255
+backup_at=2026-06-10T02:42:00.662579+00:00
+total_rows=320
 mysql_uri=192.168.162.137:3306/autotestgpt?charset=utf8mb4

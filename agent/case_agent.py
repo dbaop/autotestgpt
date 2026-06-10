@@ -23,6 +23,16 @@ class CaseAgent(ToolCapableAgent):
 必须使用中文输出测试用例内容，包括 title、description、preconditions、test_steps.action、test_steps.expected、test_data.expected_output 和 tags。
 你的测试对象是需求中描述的业务系统/功能模块，不是需求文档本身。不要生成"测试文档解析"这类用例。
 
+**测试方法论要求**：每条测试用例必须明确标注使用了哪种测试设计方法。根据需求特征选择合适的 methodology：
+- boundary_value：边界值分析 — 对输入/输出的边界（最小值、最大值、刚好超出边界）设计用例。适用于数值、日期、字符串长度等有明确范围的字段。
+- equivalence_partitioning：等价类划分 — 将输入域划分为有效/无效等价类，每类选取代表值。适用于输入校验、权限级别等场景。
+- error_guessing：错误推测 — 基于经验推测易出错场景：空值、null、特殊字符、SQL注入/XSS、超长输入、并发冲突、网络超时等。这是最重要的负面测试方法。
+- state_transition：状态迁移 — 对有明确状态机的功能（登录→在线→登出、待支付→已支付→已发货等）覆盖所有合法的状态迁移路径和非法跳转。
+- decision_table：判定表 — 对多条件组合的业务规则（如：会员等级×订单金额→折扣率），列出所有条件组合及预期结果。
+- pairwise：结对测试 — 对多参数配置场景（如：浏览器×操作系统×屏幕分辨率），用结对覆盖代替全组合。
+
+**methodology_rationale 字段**：用中文简述为什么选择该方法和覆盖了哪个边界/等价类/状态/条件。
+
 **JSON 输出规则：所有字段必须填入真实的具体值，不能使用示例模板的占位符。priority 必须是 high/medium/low 之一。**
 
 只返回合法 JSON，字段名保持英文，格式如下：
@@ -34,6 +44,8 @@ class CaseAgent(ToolCapableAgent):
       "description": "验证用户使用有效手机号和正确验证码能成功登录系统",
       "test_type": "api",
       "priority": "high",
+      "methodology": "boundary_value",
+      "methodology_rationale": "测试手机号格式的边界值（11位有效号码）",
       "preconditions": ["用户已注册", "验证码服务正常"],
       "test_steps": [
         {
@@ -310,6 +322,15 @@ class CaseAgent(ToolCapableAgent):
 
         if knowledge_prompt:
             prompt_parts.append(f"\n{knowledge_prompt}")
+
+        prompt_parts.append("\n## 测试方法论选择指南")
+        prompt_parts.append("为每条用例选择最合适的 methodology 并在 methodology_rationale 中说明原因：")
+        prompt_parts.append("- 输入字段（手机号、金额、日期、数量等有明确范围）→ boundary_value 或 equivalence_partitioning")
+        prompt_parts.append("- 登录/权限/支付/鉴权等异常场景 → error_guessing（空值、错误token、过期session等）")
+        prompt_parts.append("- 订单/申请/审批/工单等有状态流转 → state_transition")
+        prompt_parts.append("- 多条件组合规则（会员等级×订单金额→折扣、用户类型×时间段→权限）→ decision_table")
+        prompt_parts.append("- 多参数配置组合（浏览器×操作系统×语言×分辨率）→ pairwise")
+        prompt_parts.append("**硬性要求：生成的用例集必须覆盖至少 3 种不同的 methodology，且至少包含 1 个 error_guessing 负面用例。**")
 
         prompt_parts.append("\n请为上述需求设计详细测试用例。")
         prompt_parts.append("必须使用中文描述测试用例内容，字段名保持 JSON 约定。")

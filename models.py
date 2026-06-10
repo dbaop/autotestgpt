@@ -94,6 +94,7 @@ class TestCase(db.Model):
     description = db.Column(db.Text)
     test_type = db.Column(db.String(50))
     priority = db.Column(db.String(20), default='medium')
+    methodology = db.Column(db.String(50))  # boundary_value / equivalence_partitioning / error_guessing / state_transition / decision_table / pairwise
     steps = db.Column(db.JSON)
     expected_results = db.Column(db.JSON)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
@@ -109,6 +110,7 @@ class TestCase(db.Model):
             'description': self.description,
             'test_type': self.test_type,
             'priority': self.priority,
+            'methodology': self.methodology,
             'steps': self.steps,
             'expected_results': self.expected_results,
             'created_at': self.created_at.isoformat() if self.created_at else None,

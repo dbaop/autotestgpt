@@ -182,11 +182,16 @@ class CodeAgent(ToolCapableAgent):
             "\n\nHARD OUTPUT RULES (must follow):\n"
             "- Return ONLY a single JSON object of the form {\"scripts\": [...]}. "
             "No prose, no explanation, no markdown headings outside the JSON.\n"
-            "- The Playwright script goes INSIDE the JSON `code` string field — "
-            "do NOT emit a ```javascript or ```python code block.\n"
-            "- Use Python Playwright (playwright.sync_api), NOT JavaScript/Node "
-            "(no require('@playwright/test')).\n"
-            "- For UI cases, also include the `dsl` object (given/when/then)."
+            "- The `code` field MUST be valid Python using `from playwright.sync_api import sync_playwright`. "
+            "NEVER emit JavaScript, Node.js, or `require('@playwright/test')`. "
+            "NEVER write a single-line JS snippet like `page.click(...)`. "
+            "Think: import → with sync_playwright() as p → launch → goto → act → assert.\n"
+            "- For UI cases, also include the `dsl` object (given/when/then). "
+            "The `then` assertions MUST verify the test case's stated goal — "
+            "do NOT hallucinate URLs or text that don't belong to the page under test. "
+            "For example, if the test navigates to /knowledge, assert url_contains '/knowledge', "
+            "NOT '/dashboard'. If you don't know the exact expected text, "
+            "use element_visible on a known selector from the page_map instead."
         )
         full_system = (
             self.ui_test_prompt

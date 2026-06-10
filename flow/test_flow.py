@@ -81,6 +81,7 @@ class FlowDataAccess:
                 description=case_data.get('description', ''),
                 test_type=case_data.get('test_type', 'api'),
                 priority=case_data.get('priority', 'medium'),
+                methodology=case_data.get('methodology'),
                 steps=case_data.get('test_steps', []),
                 expected_results=case_data.get('test_data', {}).get('expected_output'),
             )
@@ -103,9 +104,15 @@ class FlowDataAccess:
                 code = script_data.get('code', '')
                 if isinstance(code, list):
                     code = '\n'.join(str(line) for line in code)
+                # UI tests carry a `dsl` field; their `code` is a Playwright
+                # deliverable for archival/reference, NOT a pytest script.
+                # Mark them as "playwright" so the execution layer skips them
+                # when a ui_cdp sibling exists.
+                has_dsl = bool(script_data.get('dsl'))
+                script_type = "playwright" if has_dsl else script_data.get('language', 'python')
                 ts = TestScript(
                     test_case_id=test_case_id,
-                    script_type=script_data.get('language', 'python'),
+                    script_type=script_type,
                     script_content=code,
                     file_path=script_data.get('file_path', ''),
                     status='generated',
@@ -165,6 +172,7 @@ class FlowDataAccess:
                 'description': c.description,
                 'test_type': c.test_type,
                 'priority': c.priority,
+                'methodology': c.methodology,
                 'test_steps': c.steps,
             }
             for c in cases

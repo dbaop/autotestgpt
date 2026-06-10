@@ -89,7 +89,7 @@ class ToolCapableAgent(BaseAgent):
         """
         # Build full message list for LLM
         messages = [{"role": "system", "content": system_instruction}]
-        messages.extend(conversation_messages[-20:])  # limit context
+        messages.extend(conversation_messages[-30:])  # limit context
 
         full_response = ""
         rounds = 0

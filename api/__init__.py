@@ -17,8 +17,8 @@ api_blueprint.add_url_rule('/requirements/<int:req_id>', view_func=requirements.
 api_blueprint.add_url_rule('/requirements/<int:req_id>', view_func=requirements.delete_requirement, methods=['DELETE'])
 
 # Test cases
-api_blueprint.add_url_rule('/cases', view_func=test_cases.get_test_cases, methods=['GET'])
-api_blueprint.add_url_rule('/cases/<int:case_id>', view_func=test_cases.get_test_case, methods=['GET'])
+api_blueprint.add_url_rule('/cases', view_func=test_cases.handle_cases, methods=['GET', 'POST'])
+api_blueprint.add_url_rule('/cases/<int:case_id>', view_func=test_cases.handle_case_by_id, methods=['GET', 'PUT', 'DELETE'])
 
 # Executions
 api_blueprint.add_url_rule('/executions', view_func=executions.get_executions, methods=['GET'])
@@ -70,6 +70,7 @@ api_blueprint.add_url_rule('/flow/start', view_func=flow.start_test_flow, method
 api_blueprint.add_url_rule('/flow/status/<int:req_id>', view_func=flow.get_test_flow_status, methods=['GET'])
 api_blueprint.add_url_rule('/flow/resume/<int:req_id>', view_func=flow.resume_test_flow, methods=['POST'])
 api_blueprint.add_url_rule('/flow/cancel/<int:req_id>', view_func=flow.cancel_test_flow, methods=['POST'])
+api_blueprint.add_url_rule('/flow/confirm-cases/<int:req_id>', view_func=flow.confirm_cases_test_flow, methods=['POST'])
 api_blueprint.add_url_rule('/flow/retry-script/<int:script_id>', view_func=flow.retry_test_script, methods=['POST'])
 
 # Agent config
