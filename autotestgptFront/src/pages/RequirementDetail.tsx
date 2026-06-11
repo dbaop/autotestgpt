@@ -178,12 +178,30 @@ export default function RequirementDetail() {
     [reviewTasks, selectedReviewTaskId]
   )
 
-  const executionDetails = requirement?.execution_progress?.details || []
+  // Prefer durable ExecutionRecord-derived rows (survive restarts / older runs);
+  // fall back to the live execution_progress.details blob if present.
+  const executionDetails = (requirement?.executions?.length
+    ? requirement.executions
+    : requirement?.execution_progress?.details) || []
 
   const handleResume = async () => {
     if (!requirement) return
     try { await flowApi.resume(requirement.id); await loadData(true) }
     catch (err: any) { setError(err.response?.data?.message || err.response?.data?.error || '恢复流程失败') }
+  }
+
+  const handleReExecute = async () => {
+    if (!requirement) return
+    if (!window.confirm('确定要重新执行所有测试脚本吗？\n\n这将重置脚本状态并以回归测试方式重新运行，不会重新生成用例和脚本。')) return
+    try {
+      const res = await flowApi.reExecute(requirement.id)
+      // 跳转到对话页查看执行进度
+      if (res.data.conversation_id) {
+        navigate('/chat', { state: { conversationId: res.data.conversation_id } })
+      } else {
+        await loadData(true)
+      }
+    } catch (err: any) { setError(err.response?.data?.message || err.response?.data?.error || '重新执行失败') }
   }
 
   const handleRetryScript = async (scriptId: number) => {
@@ -357,9 +375,15 @@ export default function RequirementDetail() {
               })}
             </div>
 
-            <button type="button" onClick={handleResume} className="btn btn-primary">
-              继续执行流程
-            </button>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              <button type="button" onClick={handleResume} className="btn btn-primary">
+                继续执行流程
+              </button>
+              <button type="button" onClick={handleReExecute} className="btn btn-secondary"
+                title="重新执行所有已生成的测试脚本（回归测试），不重新生成用例和脚本">
+                🔄 重新执行
+              </button>
+            </div>
           </section>
 
           {/* Test Cases */}

@@ -219,12 +219,18 @@ def _ensure_cdp_bridge_server():
     """Try to connect to CDP Bridge MCP server; if not running, start it."""
     try:
         import urllib.request, json as _json
-        req = urllib.request.Request("http://localhost:18700/mcp")
-        req.add_header("Accept", "application/json, text/event-stream")
         data = _json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                                       "clientInfo": {"name": "autotestgpt", "version": "1.0"}}}).encode()
-        req.add_header("Content-Type", "application/json")
+        req = urllib.request.Request(
+            "http://localhost:18700/mcp",
+            data=data,
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
         resp = urllib.request.urlopen(req, timeout=3)
         resp.read()
         app.logger.info("CDP Bridge MCP server already running at localhost:18700")

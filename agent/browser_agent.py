@@ -104,6 +104,17 @@ class BrowserAgent(ToolCapableAgent):
         if system_instruction:
             full_system = system_instruction + "\n\n" + full_system
 
+        # Prefer the CDP bridge (user's logged-in Chrome) before exploration
+        # starts, so a stale Playwright fallback from a startup-time race doesn't
+        # shadow a now-healthy bridge. Done here (pre-navigation) so no page
+        # state is lost; best-effort.
+        try:
+            from service.browser_probe_service import get_browser_probe
+
+            get_browser_probe().prefer_mcp()
+        except Exception:
+            pass
+
         yield from super().act(conversation_messages, full_system)
 
     # ------------------------------------------------------------------

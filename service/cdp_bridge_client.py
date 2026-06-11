@@ -74,17 +74,10 @@ class CdpBridgeClient:
             })
             if raw is None:
                 return None
-            # MCP returns content blocks; extract text and try to parse JSON
-            if "content" in raw:
-                for block in raw["content"]:
-                    if block.get("type") == "text":
-                        text = block["text"]
-                        try:
-                            parsed = json.loads(text)
-                            return parsed
-                        except json.JSONDecodeError:
-                            return {"text": text}
-            return raw
+            parsed = self._decode_tool_result(raw)
+            if parsed and parsed.get("_mcp_is_error"):
+                logger.warning("CDP Bridge tool %s returned error: %s", tool_name, self._error_message(parsed))
+            return parsed
         except Exception as exc:
             logger.warning("CDP Bridge call %s failed: %s", tool_name, exc)
             return None
@@ -93,17 +86,23 @@ class CdpBridgeClient:
         """Navigate the active tab to *url*."""
         result = self.call("browser_navigate", {"url": url})
         if result:
-            status = result.get("status", "")
-            if "success" in str(status).lower():
-                return {"ok": True, "url": url}
-            return {"ok": True, "url": url, "msg": result.get("msg", "")}
+            if result.get("_mcp_is_error"):
+                return {"ok": False, "url": url, "error": self._error_message(result)}
+            status = str(result.get("status", "")).lower()
+            if result.get("ok") is False or any(token in status for token in ("error", "fail")):
+                return {"ok": False, "url": url, "error": self._error_message(result)}
+            if "success" in status or "ok" in status or not status:
+                return {"ok": True, "url": url, "msg": result.get("msg", "")}
+            return {"ok": False, "url": url, "error": self._error_message(result, f"unexpected navigate status: {status}")}
         return {"ok": False, "error": "navigate failed"}
 
     def scan(self, text_only: bool = True) -> Dict[str, Any]:
         """Get page text/HTML content."""
         result = self.call("browser_scan", {"text_only": text_only})
         if result:
-            text = result.get("content", "") or result.get("text", "") or str(result)
+            if result.get("_mcp_is_error"):
+                return {"ok": False, "error": self._error_message(result)}
+            text = result.get("content", "") or result.get("text", "") or result.get("result", "") or str(result)
             return {"ok": True, "content": text, "length": len(text)}
         return {"ok": False, "error": "scan failed"}
 
@@ -111,13 +110,17 @@ class CdpBridgeClient:
         """Take a screenshot of the active tab."""
         result = self.call("browser_screenshot", {})
         if result:
-            return {"ok": True, "data_url": result.get("result", str(result))}
+            if result.get("_mcp_is_error"):
+                return {"ok": False, "error": self._error_message(result)}
+            return {"ok": True, "data_url": result.get("result") or result.get("text") or str(result)}
         return {"ok": False, "error": "screenshot failed"}
 
     def execute_js(self, code: str) -> Dict[str, Any]:
         """Execute JavaScript in the page."""
-        result = self.call("browser_execute_js", {"script": code})
+        result = self.call("browser_execute_js", {"script": code, "no_monitor": True})
         if result:
+            if result.get("_mcp_is_error"):
+                return {"ok": False, "error": self._error_message(result)}
             js_return = result.get("js_return", "") or result.get("result", "")
             return {"ok": True, "result": str(js_return)}
         return {"ok": False, "error": "execute_js failed"}
@@ -126,9 +129,78 @@ class CdpBridgeClient:
         """List all open browser tabs."""
         result = self.call("browser_get_tabs", {})
         if result:
+            if result.get("_mcp_is_error"):
+                return {"ok": False, "error": self._error_message(result)}
             tabs = result.get("tabs", [])
             return {"ok": True, "tabs": tabs}
         return {"ok": False, "error": "get_tabs failed"}
+
+    @staticmethod
+    def _decode_tool_result(raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize MCP tool output.
+
+        cdp-bridge exposes most tool outputs as JSON strings either in
+        ``content[].text`` or ``structuredContent.result``. Older code only
+        looked at content blocks, which made some valid responses appear empty.
+        """
+        if not isinstance(raw, dict):
+            return {"result": raw}
+
+        is_error = bool(raw.get("isError"))
+        candidates: list[Any] = []
+
+        structured = raw.get("structuredContent")
+        if isinstance(structured, dict):
+            if "result" in structured:
+                candidates.append(structured.get("result"))
+            else:
+                candidates.append(structured)
+
+        for block in raw.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "text":
+                candidates.append(block.get("text", ""))
+
+        if "result" in raw:
+            candidates.append(raw.get("result"))
+
+        for candidate in candidates:
+            parsed = CdpBridgeClient._coerce_tool_candidate(candidate)
+            if parsed is not None:
+                if is_error:
+                    parsed["_mcp_is_error"] = True
+                return parsed
+
+        parsed = dict(raw)
+        if is_error:
+            parsed["_mcp_is_error"] = True
+        return parsed
+
+    @staticmethod
+    def _coerce_tool_candidate(candidate: Any) -> Optional[Dict[str, Any]]:
+        if candidate is None:
+            return None
+        if isinstance(candidate, dict):
+            return dict(candidate)
+        if isinstance(candidate, str):
+            text = candidate.strip()
+            if not text:
+                return {"text": ""}
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    return parsed
+                return {"result": parsed}
+            except json.JSONDecodeError:
+                return {"text": candidate, "result": candidate}
+        return {"result": candidate}
+
+    @staticmethod
+    def _error_message(result: Dict[str, Any], fallback: str = "CDP Bridge tool failed") -> str:
+        for key in ("error", "message", "msg", "text", "result"):
+            value = result.get(key)
+            if value:
+                return str(value)
+        return fallback
 
     def extract_content(self) -> Dict[str, Any]:
         """Extract visible text content from the current page (via scan)."""

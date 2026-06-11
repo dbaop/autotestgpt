@@ -172,6 +172,10 @@ def run_ui_dsl(dsl: Dict[str, Any], base_url: str = "", screenshot_prefix: str =
 
     probe = get_browser_probe()
     try:
+        # Prefer the real CDP bridge (user's logged-in Chrome) over any stale
+        # Playwright fallback cached from a startup-time race. Safe here because
+        # each DSL run navigates fresh from given.url — no page state to lose.
+        probe.prefer_mcp()
         connected = probe.is_connected or probe.connect()
     except Exception as exc:
         connected = False

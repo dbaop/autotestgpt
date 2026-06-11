@@ -8,6 +8,7 @@ from service.errors import AppError
 from service.flow_service import (
     confirm_case_review,
     get_flow_status,
+    re_execute_requirement,
     request_cancel,
     resume_flow,
     retry_script,
@@ -63,3 +64,17 @@ def confirm_cases_test_flow(req_id: int):
         return jsonify(payload), 202
     except AppError as e:
         return jsonify(e.to_dict()), e.status_code
+
+
+def re_execute_test_flow(req_id: int):
+    """Re-execute all scripts for a requirement (regression test)."""
+    import logging
+    _log = logging.getLogger(__name__)
+    try:
+        payload = re_execute_requirement(req_id)
+        return jsonify(payload), 202
+    except AppError as e:
+        return jsonify(e.to_dict()), e.status_code
+    except Exception as e:
+        _log.exception("re_execute_test_flow failed for req %d", req_id)
+        return jsonify({"error": str(type(e).__name__), "message": str(e)}), 500

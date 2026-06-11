@@ -17,9 +17,20 @@ export interface Requirement {
   knowledge_base_id?: number | null
 }
 
+export interface RequirementExecutionDetail {
+  script_id: number
+  script_name?: string | null
+  case_id?: number | null
+  status: string
+  execution_time?: number | null
+  error?: string | null
+  end_time?: string | null
+}
+
 export interface RequirementDetail extends Requirement {
   structured_data?: any
   test_cases: TestCase[]
+  executions?: RequirementExecutionDetail[]
 }
 
 export interface TestCase {
@@ -224,8 +235,10 @@ export interface FlowStartResponse {
 export interface FlowResumeResponse {
   message: string
   requirement_id: number
+  conversation_id?: number
   previous_status?: string
   status: string
+  orchestrator_mode?: boolean
 }
 
 export interface FlowStartPayload {
@@ -286,6 +299,7 @@ export const flowApi = {
   resume: (requirementId: number) => api.post<FlowResumeResponse>(`/flow/resume/${requirementId}`),
   cancel: (requirementId: number) => api.post<{ message: string; requirement_id: number; status: string }>(`/flow/cancel/${requirementId}`),
   confirmCases: (requirementId: number) => api.post<FlowResumeResponse>(`/flow/confirm-cases/${requirementId}`),
+  reExecute: (requirementId: number) => api.post<FlowResumeResponse>(`/flow/re-execute/${requirementId}`),
   status: (requirementId: number) => api.get<{ requirement_id: number; db_status: string; flow_status: string; execution_progress: any }>(`/flow/status/${requirementId}`),
   retryScript: (scriptId: number) => api.post<{ message: string; script_id: number; status: string; execution_time: number; error?: string }>(`/flow/retry-script/${scriptId}`),
 }

@@ -183,3 +183,249 @@ def test_orchestrator_detects_env_from_chat_message():
         assert result4 is None
 
         db.session.remove()
+
+
+def test_env_message_echoing_unchanged_url_is_not_a_change():
+    """Re-run regression: the synthetic resume message echoes the already-saved
+    test_url. That must NOT be detected as a mid-flow env change, otherwise the
+    orchestrator cancels the flow instead of re-executing scripts."""
+    import sys
+    import tempfile
+    from pathlib import Path as _Path
+
+    from flask import Flask
+    import werkzeug
+    if not hasattr(werkzeug, "__version__"):
+        werkzeug.__version__ = "3"
+
+    RO = _Path(__file__).resolve().parents[1]
+    if str(RO) not in sys.path:
+        sys.path.insert(0, str(RO))
+
+    from agent.orchestrator import ConversationOrchestrator
+    from models import db, Requirement
+
+    app = Flask(__name__)
+    orch_tmp = _Path("workspace") / "pytest_orch_env_unchanged"
+    orch_tmp.mkdir(parents=True, exist_ok=True)
+    tmp = _Path(tempfile.mkdtemp(dir=orch_tmp))
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{tmp / 'orch_env2.db'}"
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
+
+    with app.app_context():
+        db.create_all()
+        url = "https://staging.example.com"
+        req = Requirement(
+            title="Test", description="test", raw_text="test",
+            structured_data={"test_environment": {"test_url": url}},
+            execution_progress={"test_environment": {"test_url": url}},
+            status="code_generated",
+        )
+        db.session.add(req)
+        db.session.commit()
+
+        orch = ConversationOrchestrator()
+
+        # Same as flow_service.resume_flow's synthetic re-run message.
+        msg = f"测试地址 {url} 已配置，请开始探索页面并推进测试流程"
+        result = orch._try_save_env_from_message(req, msg, 1)
+        assert result is None  # unchanged → not reported as an env change
+
+        # A genuinely different URL is still detected.
+        result2 = orch._try_save_env_from_message(
+            req, "测试地址 https://prod.example.com", 1
+        )
+        assert result2 is not None
+        assert "测试地址" in result2
+
+        db.session.remove()
+
+
+def _orch_app(tmp_name: str):
+    import sys
+    import tempfile
+    from pathlib import Path as _Path
+
+    from flask import Flask
+    import werkzeug
+    if not hasattr(werkzeug, "__version__"):
+        werkzeug.__version__ = "3"
+
+    RO = _Path(__file__).resolve().parents[1]
+    if str(RO) not in sys.path:
+        sys.path.insert(0, str(RO))
+
+    from models import db
+
+    app = Flask(__name__)
+    base = _Path("workspace") / tmp_name
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = _Path(tempfile.mkdtemp(dir=base))
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{tmp / 'orch.db'}"
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
+    return app
+
+
+def test_handle_artifact_preserves_user_supplied_title():
+    """User enters a title in the New Test form; the requirement-parsing artifact
+    must NOT overwrite it, otherwise the title disappears from the requirement
+    list. An auto-generated placeholder title, however, should still be filled."""
+    app = _orch_app("pytest_orch_title")
+
+    from agent.orchestrator import ConversationOrchestrator
+    from models import db, Requirement
+
+    with app.app_context():
+        db.create_all()
+        orch = ConversationOrchestrator()
+
+        # 1) User-supplied title is preserved (not overwritten by parsed title).
+        user_req = Requirement(
+            title="会员中心登录需求", description="d", raw_text="r",
+            structured_data={}, status="pending",
+        )
+        db.session.add(user_req)
+        db.session.commit()
+        orch._handle_artifact(
+            user_req, "structured_requirement",
+            {"title": "LLM 解析出来的标题", "description": "parsed"}, 0,
+        )
+        db.session.refresh(user_req)
+        assert user_req.title == "会员中心登录需求"
+        assert user_req.description == "parsed"
+
+        # 2) Auto-generated placeholder title is filled from the parsed result.
+        ph_req = Requirement(
+            title="Requirement-20260611-101010", description="d", raw_text="r",
+            structured_data={}, status="pending",
+        )
+        db.session.add(ph_req)
+        db.session.commit()
+        orch._handle_artifact(
+            ph_req, "structured_requirement",
+            {"title": "解析标题", "description": "parsed"}, 0,
+        )
+        db.session.refresh(ph_req)
+        assert ph_req.title == "解析标题"
+
+        db.session.remove()
+
+
+def test_orchestrator_executes_api_python_scripts_before_report():
+    """README promises API scripts run via pytest. A generated API python script
+    must be treated as executable instead of being filtered out and reported as
+    "nothing to run"."""
+    app = _orch_app("pytest_orch_api_exec")
+
+    from agent.orchestrator import ConversationOrchestrator
+    from models import Conversation, ExecutionRecord, Requirement, TestCase, TestScript, db
+
+    with app.app_context():
+        db.create_all()
+        req = Requirement(
+            title="API smoke", description="d", raw_text="r",
+            structured_data={}, status="code_generated",
+        )
+        db.session.add(req)
+        db.session.flush()
+        conv = Conversation(title="c", requirement_id=req.id)
+        db.session.add(conv)
+        case = TestCase(
+            requirement_id=req.id,
+            title="TC-API-001 查询列表",
+            description="api",
+            test_type="api",
+            priority="high",
+        )
+        db.session.add(case)
+        db.session.flush()
+        script = TestScript(
+            test_case_id=case.id,
+            script_type="python",
+            script_content="def test_api():\n    assert True\n",
+            file_path="workspace/scripts/test_api.py",
+            status="generated",
+        )
+        db.session.add(script)
+        db.session.commit()
+
+        orch = ConversationOrchestrator()
+        calls = []
+
+        def fake_process(payload):
+            calls.append(payload)
+            return {
+                "status": "success",
+                "execution_time": 0.01,
+                "result": {"passed": True},
+                "error": None,
+            }
+
+        orch._agents["exec_agent"].process = fake_process
+
+        events = list(orch._run_execution(conv.id, req))
+
+        db.session.refresh(req)
+        assert calls and calls[0]["script_id"] == script.id
+        assert req.status == "executed"
+        assert ExecutionRecord.query.filter_by(test_script_id=script.id).count() == 1
+        assert not any(event.get("key") == "final_report" for event in events)
+
+        db.session.remove()
+
+
+def test_orchestrator_does_not_mark_executed_when_no_executable_scripts_exist():
+    """A UI Playwright deliverable without a ui_cdp DSL is not automatically
+    executable. The orchestrator must stop in an error state instead of moving
+    to executed, because executed immediately triggers report generation."""
+    app = _orch_app("pytest_orch_no_executable")
+
+    from agent.orchestrator import ConversationOrchestrator
+    from models import Conversation, ExecutionRecord, Requirement, TestCase, TestScript, db
+
+    with app.app_context():
+        db.create_all()
+        req = Requirement(
+            title="UI flow", description="d", raw_text="r",
+            structured_data={"test_environment": {"test_url": "https://example.test"}},
+            execution_progress={"test_environment": {"test_url": "https://example.test"}},
+            status="code_generated",
+        )
+        db.session.add(req)
+        db.session.flush()
+        conv = Conversation(title="c", requirement_id=req.id)
+        db.session.add(conv)
+        case = TestCase(
+            requirement_id=req.id,
+            title="TC-UI-001 登录",
+            description="ui",
+            test_type="ui",
+            priority="high",
+        )
+        db.session.add(case)
+        db.session.flush()
+        db.session.add(
+            TestScript(
+                test_case_id=case.id,
+                script_type="playwright",
+                script_content="from playwright.sync_api import Page\n",
+                file_path="workspace/scripts/test_ui.py",
+                status="generated",
+            )
+        )
+        db.session.commit()
+
+        orch = ConversationOrchestrator()
+        events = list(orch._run_execution(conv.id, req))
+
+        db.session.refresh(req)
+        assert req.status == "error"
+        assert req.execution_progress["completed"] is False
+        assert "没有可执行" in req.execution_progress["error"]
+        assert ExecutionRecord.query.count() == 0
+        assert any(event.get("type") == "error" for event in events)
+
+        db.session.remove()
+

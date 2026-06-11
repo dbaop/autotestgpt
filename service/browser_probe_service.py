@@ -63,6 +63,53 @@ class BrowserProbe:
         # ——— Strategy 3: launch standalone Chromium ———
         return self._try_standalone_launch()
 
+    def prefer_mcp(self) -> bool:
+        """Ensure we're on the CDP Bridge MCP backend if it's reachable.
+
+        The backend is otherwise chosen once and cached on the module-level
+        singleton. If the very first browser op happened during the startup
+        window — before ``uvx cdp-bridge`` finished booting / the extension
+        paired — ``connect()`` fell back to a Playwright backend (standalone
+        Chromium or direct CDP) and that choice stuck for the whole process,
+        even after the bridge became healthy. That's why the logs "keep using
+        Playwright" although the CDP bridge is up.
+
+        Call this at safe points (no live page state to lose) to let a healthy
+        bridge reclaim the session. It only performs an HTTP initialize — it
+        never launches a browser — so it is cheap when already on MCP (short
+        circuit) and a no-op when the bridge is down.
+
+        Returns True if we end up on the MCP backend.
+        """
+        if self._mode == "mcp" and self.is_connected:
+            return True
+
+        # Hold on to any Playwright fallback we may currently own so we can tear
+        # it down only after the bridge connection is confirmed.
+        stale_browser = self._browser
+        stale_playwright = self._playwright
+
+        if self._try_mcp_connect():  # sets _mode="mcp" and _mcp_client
+            if stale_browser is not None or stale_playwright is not None:
+                try:
+                    if stale_browser:
+                        stale_browser.close()
+                except Exception:
+                    pass
+                try:
+                    if stale_playwright:
+                        stale_playwright.stop()
+                except Exception:
+                    pass
+                self._page = None
+                self._browser = None
+                self._playwright = None
+            logger.info("Upgraded browser backend to CDP Bridge MCP")
+            return True
+
+        return False
+
+
     def _try_mcp_connect(self) -> bool:
         try:
             from service.cdp_bridge_client import CdpBridgeClient

@@ -811,26 +811,36 @@ class ConversationOrchestrator:
             env = self._collect_env(requirement)
 
         all_scripts = FlowDataAccess.get_scripts_for_requirement(requirement.id)
-        # After case review gate, only UI (ui_cdp) scripts should be executed.
-        # API tests are skipped at this stage.  Filter out Playwright/python
-        # deliverables and keep only the executable CDP DSL scripts.
-        ui_cdp_case_ids = {s.test_case_id for s in all_scripts if s.script_type == "ui_cdp"}
+        # UI cases produce two rows: a Playwright deliverable plus an executable
+        # ui_cdp DSL row. Execute the DSL row, skip the Playwright deliverable.
+        # API tests, however, are executable python/pytest scripts and must run.
         scripts = [
             s for s in all_scripts
-            if s.script_type == "ui_cdp"
-            or (s.script_type not in ("playwright", "python") and s.test_case_id not in ui_cdp_case_ids)
+            if (s.script_type or "").lower() != "playwright"
         ]
         if not scripts:
-            FlowDataAccess.update_requirement(requirement.id, status="executed")
-            msg = "没有可执行的测试脚本，跳过执行。"
-            self._save_agent_message(conversation_id, "exec_agent", msg)
-            yield {"type": "message", "complete": True, "content": msg}
+            error = (
+                "没有可执行的测试脚本：UI 用例需要 ui_cdp DSL，API 用例需要 python/pytest 脚本。"
+                "已停止，避免未执行测试就生成报告。"
+            )
+            FlowDataAccess.update_requirement(requirement.id, status="error")
+            FlowDataAccess.set_execution_progress(
+                requirement.id,
+                {"total": 0, "executed": 0, "completed": False,
+                 "error": error, "end_time": _now().isoformat(), "details": []},
+            )
+            self._save_agent_message(conversation_id, "exec_agent", error)
+            yield {"type": "error", "message": error}
             return
 
         yield {"type": "phase_change", "from": "code_generated", "to": "executing", "agent": "exec_agent"}
         exec_agent = self._agents["exec_agent"]
         total = len(scripts)
         executed = 0
+        # Per-script execution details consumed by the RequirementDetail page
+        # (requirement.execution_progress.details). Without this the UI shows
+        # "暂无执行记录" and the per-script 重试 button never appears.
+        details: List[Dict[str, Any]] = []
 
         for idx, script in enumerate(scripts):
             # Cooperative cancellation between scripts: keep finished records,
@@ -839,7 +849,7 @@ class ConversationOrchestrator:
                 FlowDataAccess.set_execution_progress(
                     requirement.id,
                     {"total": total, "executed": executed, "cancelled": True,
-                     "end_time": _now().isoformat()},
+                     "end_time": _now().isoformat(), "details": details},
                 )
                 msg = f"执行已被用户终止，已完成 {executed}/{total} 个脚本。可点重跑/回复『继续』从当前阶段继续。"
                 self._save_agent_message(conversation_id, "exec_agent", msg)
@@ -848,6 +858,14 @@ class ConversationOrchestrator:
 
             is_ui = script.script_type == "ui_cdp"
             tool_name = "run_ui_dsl" if is_ui else "run_pytest"
+            detail: Dict[str, Any] = {
+                "script_id": script.id,
+                "script_name": script.file_path,
+                "case_id": script.test_case_id,
+                "status": "running",
+                "start_time": _now().isoformat(),
+            }
+            details.append(detail)
             yield {
                 "type": "tool_call",
                 "name": tool_name,
@@ -890,6 +908,10 @@ class ConversationOrchestrator:
                 FlowDataAccess.update_script_status(
                     script.id, "executed" if status == "success" else "error"
                 )
+                detail["status"] = status
+                detail["execution_time"] = result.get("execution_time", 0)
+                detail["error"] = result.get("error")
+                detail["end_time"] = _now().isoformat()
             except Exception as exc:
                 logger.error("Script %s execution failed: %s", script.id, exc)
                 db.session.rollback()
@@ -903,7 +925,15 @@ class ConversationOrchestrator:
                 db.session.commit()
                 FlowDataAccess.update_script_status(script.id, "error")
                 status = "error"
+                detail["status"] = "error"
+                detail["error"] = str(exc)
+                detail["end_time"] = _now().isoformat()
             executed += 1
+            # Persist progress incrementally so the page reflects live results.
+            FlowDataAccess.set_execution_progress(
+                requirement.id,
+                {"total": total, "executed": executed, "details": details},
+            )
             yield {
                 "type": "tool_result",
                 "name": tool_name,
@@ -913,7 +943,8 @@ class ConversationOrchestrator:
         FlowDataAccess.update_requirement(requirement.id, status="executed")
         FlowDataAccess.set_execution_progress(
             requirement.id,
-            {"total": total, "executed": executed, "completed": True, "end_time": _now().isoformat()},
+            {"total": total, "executed": executed, "completed": True,
+             "end_time": _now().isoformat(), "details": details},
         )
         summary = f"测试执行完成：共 {total} 个脚本。"
         self._save_agent_message(conversation_id, "exec_agent", summary)
@@ -1305,8 +1336,8 @@ class ConversationOrchestrator:
         )
         if url_m:
             test_url = url_m.group(1).rstrip("/")
-            self._merge_env(requirement, "test_url", test_url)
-            saved.append("测试地址")
+            if self._merge_env(requirement, "test_url", test_url):
+                saved.append("测试地址")
         else:
             # Bare URL in message
             bare_url = re.search(r'(https?://[^\s,，。；;]{10,})', message)
@@ -1315,8 +1346,8 @@ class ConversationOrchestrator:
                 or "yuque" in bare_url.group(1) or "notion" in bare_url.group(1)
             ):
                 test_url = bare_url.group(1).rstrip("/")
-                self._merge_env(requirement, "test_url", test_url)
-                saved.append("测试地址")
+                if self._merge_env(requirement, "test_url", test_url):
+                    saved.append("测试地址")
 
         # --- login_state ---
         ls_m = re.search(
@@ -1325,8 +1356,8 @@ class ConversationOrchestrator:
             message, re.IGNORECASE,
         )
         if ls_m:
-            self._merge_env(requirement, "login_state", ls_m.group(1).lower())
-            saved.append("登录态")
+            if self._merge_env(requirement, "login_state", ls_m.group(1).lower()):
+                saved.append("登录态")
 
         # --- credential_ref ---
         cred_m = re.search(
@@ -1335,8 +1366,8 @@ class ConversationOrchestrator:
             message, re.IGNORECASE,
         )
         if cred_m:
-            self._merge_env(requirement, "credential_ref", cred_m.group(1))
-            saved.append("凭据")
+            if self._merge_env(requirement, "credential_ref", cred_m.group(1)):
+                saved.append("凭据")
 
         if saved:
             db.session.commit()
@@ -1344,9 +1375,14 @@ class ConversationOrchestrator:
             return ", ".join(saved)
         return None
 
-    def _merge_env(self, requirement: Requirement, key: str, value: str):
+    def _merge_env(self, requirement: Requirement, key: str, value: str) -> bool:
         """Merge a key into the requirement's test_environment across both
-        structured_data and execution_progress."""
+        structured_data and execution_progress.
+
+        Returns True only if the value actually changed from what was already
+        stored. A no-op merge (same value) returns False so callers can tell a
+        genuine env change apart from a message that merely echoes the current
+        config (e.g. the synthetic resume message sent on re-run)."""
         from sqlalchemy.orm.attributes import flag_modified
 
         progress = requirement.execution_progress or {}
@@ -1356,6 +1392,13 @@ class ConversationOrchestrator:
             progress = {}
         if not isinstance(structured, dict):
             structured = {}
+
+        # Consider it changed if either container differs from the new value.
+        prev = (structured.get("test_environment") or {}).get(key)
+        prev_progress = (progress.get("test_environment") or {}).get(key)
+        changed = (prev != value) or (prev_progress != value)
+        if not changed:
+            return False
 
         # Update in both places so all agents can see it
         for container in (progress, structured):
@@ -1368,6 +1411,7 @@ class ConversationOrchestrator:
         # JSON columns need explicit dirty marking when mutated in-place
         flag_modified(requirement, "execution_progress")
         flag_modified(requirement, "structured_data")
+        return True
 
     def _get_environment_info(self, requirement: Requirement) -> str:
         """Extract saved environment config from the requirement for agent prompts."""
@@ -1567,33 +1611,45 @@ class ConversationOrchestrator:
             elif artifact_key == "test_scripts":
                 scripts = (artifact_data or {}).get("scripts", [])
                 if scripts:
-                    # After case review gate, only persist scripts for UI test cases
-                    # (CodeAgent may still return API scripts if it ignores instructions)
+                    # After case review gate, only persist scripts for UI test cases.
+                    # Match using the same logic as FlowDataAccess.save_scripts:
+                    #   script_id ∈ case.title   (e.g., "TC-001" in "TC-001 验证菜单")
                     try:
                         from models import TestCase as _TC
+                        all_cases = _TC.query.filter_by(
+                            requirement_id=requirement.id
+                        ).all()
                         ui_case_titles = {
-                            c.title
-                            for c in _TC.query.filter_by(
-                                requirement_id=requirement.id
-                            ).all()
+                            c.title for c in all_cases
                             if (c.test_type or "").lower() == "ui"
                         }
                         if ui_case_titles:
-                            scripts = [
-                                s for s in scripts
-                                if s.get("id") and s["id"] in ui_case_titles
-                            ]
+                            filtered = []
+                            for s in scripts:
+                                sid = str(s.get("id", ""))
+                                # Match: script id appears inside a UI case title
+                                matched = any(sid in t for t in ui_case_titles)
+                                if matched:
+                                    filtered.append(s)
+                            scripts = filtered
                             logger.info(
                                 "Filtered scripts to %d UI-only for req %d",
                                 len(scripts), requirement.id,
                             )
                     except Exception:
                         pass  # non-fatal; save whatever CodeAgent returned
-                    # Playwright/pytest scripts (deliverables + API executables)
-                    FlowDataAccess.save_scripts(scripts, requirement.id)
-                    # UI cases additionally get an executable ui_cdp DSL row
-                    self._save_ui_dsl_scripts(requirement.id, scripts)
-                    logger.info("Saved %d test scripts for req %d", len(scripts), requirement.id)
+                    if scripts:
+                        # Playwright/pytest scripts (deliverables + API executables)
+                        FlowDataAccess.save_scripts(scripts, requirement.id)
+                        # UI cases additionally get an executable ui_cdp DSL row
+                        self._save_ui_dsl_scripts(requirement.id, scripts)
+                        logger.info("Saved %d test scripts for req %d", len(scripts), requirement.id)
+                    else:
+                        logger.warning(
+                            "No UI scripts to save for req %d (all %d scripts filtered)",
+                            requirement.id,
+                            len((artifact_data or {}).get("scripts", [])),
+                        )
             elif artifact_key == "page_map":
                 structured = requirement.structured_data or {}
                 if not isinstance(structured, dict):
@@ -1607,8 +1663,15 @@ class ConversationOrchestrator:
                 if not isinstance(structured, dict):
                     structured = {}
                 structured["structured_requirement"] = artifact_data
-                # Sync title/description from parsed result for display in lists
-                if artifact_data.get("title"):
+                # Sync title/description from parsed result ONLY when the user did
+                # not supply a meaningful title. Users enter a title in the New
+                # Test form (persisted on the requirement up front); overwriting it
+                # with the LLM-parsed title made their input disappear from the
+                # requirement list. Keep the user's title; only fill an empty or
+                # auto-generated ("Requirement-<timestamp>") placeholder.
+                cur_title = (requirement.title or "").strip()
+                is_placeholder = (not cur_title) or cur_title.startswith("Requirement-")
+                if is_placeholder and artifact_data.get("title"):
                     requirement.title = artifact_data["title"]
                 if artifact_data.get("description"):
                     requirement.description = artifact_data["description"]

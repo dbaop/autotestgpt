@@ -411,6 +411,51 @@ def confirm_case_review(requirement_id: int):
     return resume_flow(requirement_id)
 
 
+# ---------------------------------------------------------------------------
+# re_execute_requirement — re-run all scripts for regression testing
+# ---------------------------------------------------------------------------
+
+
+def re_execute_requirement(requirement_id: int):
+    """Re-execute all existing test scripts for a requirement.
+
+    Resets script statuses and sets the requirement back to code_generated
+    so the orchestrator picks up from execution.  No cases or scripts are
+    regenerated — this is a pure re-run (regression test).
+    """
+    requirement = db.session.get(Requirement, requirement_id)
+    if not requirement:
+        raise NotFoundError(f"Requirement {requirement_id} not found")
+
+    # Reset all ui_cdp scripts to "generated" so they are picked up again
+    ui_case_ids = [
+        c.id for c in
+        TestCase.query.filter_by(requirement_id=requirement_id).all()
+    ]
+    updated = 0
+    if ui_case_ids:
+        updated = (
+            TestScript.query
+            .filter(
+                TestScript.test_case_id.in_(ui_case_ids),
+                TestScript.script_type == "ui_cdp",
+            )
+            .update({"status": "generated"}, synchronize_session="fetch")
+        )
+    db.session.commit()
+    logger.info(
+        "Re-execute: reset %d ui_cdp scripts to generated for req %d",
+        updated, requirement_id,
+    )
+
+    # Set status to code_generated so _drive goes straight to execution
+    requirement.status = "code_generated"
+    db.session.commit()
+
+    # Kick off the orchestrator
+    return resume_flow(requirement_id)
+
+
 def resume_flow(requirement_id: int):
     requirement = db.session.get(Requirement, requirement_id)
     if not requirement:
@@ -563,6 +608,26 @@ def retry_script(script_id: int):
     )
     db.session.add(record)
     script.status = "executed" if result.get("status") == "success" else "error"
+
+    # Reflect the retry result back into the requirement's execution_progress
+    # details so the RequirementDetail page updates after a retry (otherwise the
+    # script keeps showing its old failed status and 重试 looks like a no-op).
+    requirement = script.test_case.requirement if script.test_case else None
+    if requirement and isinstance(requirement.execution_progress, dict):
+        from sqlalchemy.orm.attributes import flag_modified
+
+        progress = requirement.execution_progress
+        details = progress.get("details")
+        if isinstance(details, list):
+            for detail in details:
+                if detail.get("script_id") == script.id:
+                    detail["status"] = result.get("status", "unknown")
+                    detail["execution_time"] = result.get("execution_time", 0)
+                    detail["error"] = result.get("error")
+                    detail["end_time"] = _now().isoformat()
+                    break
+            flag_modified(requirement, "execution_progress")
+
     db.session.commit()
     return {
         "message": "Script retry completed",

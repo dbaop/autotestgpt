@@ -30,14 +30,29 @@ def _missing_env_items(env: dict[str, Any], review: dict[str, Any]) -> list[str]
     items: list[str] = []
     if not env.get("test_url"):
         items.append("测试地址")
-    if not env.get("login_state") or env.get("login_state") == "unknown":
+
+    login_state = env.get("login_state")
+    if not login_state or login_state == "unknown":
+        # Login posture itself is unknown — ask for that, not yet for credentials.
         items.append("登录态")
-    if not env.get("credential_ref"):
+    elif login_state != "no_login_required" and not env.get("credential_ref"):
+        # Credentials only matter when the site actually needs a login/session.
         items.append("凭据")
-    if not review.get("repo_url") and not review.get("repo_path"):
-        items.append("代码仓库")
-    if not review.get("branch"):
-        items.append("分支")
+
+    # Repo / branch are only relevant when the user opted into code review.
+    # Without an explicit opt-in these stay empty and must NOT be demanded,
+    # otherwise every requirement nags for a repo it never needed.
+    review_enabled = bool(
+        review.get("enabled")
+        or review.get("status")
+        or review.get("repo_url")
+        or review.get("repo_path")
+    )
+    if review_enabled:
+        if not review.get("repo_url") and not review.get("repo_path"):
+            items.append("代码仓库")
+        if not review.get("branch"):
+            items.append("分支")
     return items
 
 

@@ -8,10 +8,12 @@ from models import (
     AgentEvent,
     Conversation,
     DefectCandidate,
+    ExecutionRecord,
     FinalReport,
     FixSuggestion,
     Requirement,
     TestCase,
+    TestScript,
     db,
 )
 from service.errors import NotFoundError, ValidationError
@@ -47,6 +49,54 @@ def get_requirement_or_404(req_id: int) -> Requirement:
     return requirement
 
 
+def _latest_executions_for_requirement(req_id: int):
+    """Build the execution panel from durable ExecutionRecord rows (latest per
+    script).
+
+    The frontend used to read requirement.execution_progress.details, but that
+    JSON blob is only written by a live run — older requirements (and any run
+    before the orchestrator started persisting details) have no details, so the
+    execution panel showed "暂无执行记录" and the per-script 重试 button never
+    appeared even though execution history existed. ExecutionRecord is the
+    durable source of truth, so derive the panel from it and a retry (which
+    inserts a fresh ExecutionRecord) is reflected on the next reload.
+    """
+    cases = TestCase.query.filter_by(requirement_id=req_id).all()
+    case_ids = [c.id for c in cases]
+    if not case_ids:
+        return []
+    scripts = TestScript.query.filter(TestScript.test_case_id.in_(case_ids)).all()
+    script_map = {s.id: s for s in scripts}
+    if not script_map:
+        return []
+    records = (
+        ExecutionRecord.query
+        .filter(ExecutionRecord.test_script_id.in_(list(script_map.keys())))
+        .order_by(ExecutionRecord.id.asc())
+        .all()
+    )
+    # Highest-id record wins → the latest attempt (incl. retries).
+    latest: dict[int, ExecutionRecord] = {}
+    for rec in records:
+        latest[rec.test_script_id] = rec
+
+    details = []
+    for sid, rec in latest.items():
+        script = script_map.get(sid)
+        ts = rec.finished_at or rec.started_at
+        details.append({
+            "script_id": sid,
+            "script_name": script.file_path if script else None,
+            "case_id": script.test_case_id if script else None,
+            "status": rec.status,
+            "execution_time": rec.execution_time,
+            "error": rec.error_message,
+            "end_time": ts.isoformat() if ts else None,
+        })
+    details.sort(key=lambda d: d["script_id"])
+    return details
+
+
 def get_requirement_detail(req_id: int):
     requirement = get_requirement_or_404(req_id)
     test_cases = TestCase.query.filter_by(requirement_id=req_id).all()
@@ -54,6 +104,7 @@ def get_requirement_detail(req_id: int):
     payload["test_cases"] = [tc.to_dict() for tc in test_cases]
     payload["structured_data"] = requirement.structured_data
     payload["knowledge_base_id"] = requirement.knowledge_base_id
+    payload["executions"] = _latest_executions_for_requirement(req_id)
     return payload
 
 
