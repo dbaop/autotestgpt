@@ -7,6 +7,7 @@ from flask import jsonify, request
 from service.errors import AppError
 from service.flow_service import (
     confirm_case_review,
+    confirm_code_review,
     get_flow_status,
     re_execute_requirement,
     request_cancel,
@@ -61,6 +62,15 @@ def confirm_cases_test_flow(req_id: int):
     """Mark case review as confirmed and resume the flow."""
     try:
         payload = confirm_case_review(req_id)
+        return jsonify(payload), 202
+    except AppError as e:
+        return jsonify(e.to_dict()), e.status_code
+
+
+def confirm_review_test_flow(req_id: int):
+    """Mark code review as confirmed and resume report generation."""
+    try:
+        payload = confirm_code_review(req_id)
         return jsonify(payload), 202
     except AppError as e:
         return jsonify(e.to_dict()), e.status_code

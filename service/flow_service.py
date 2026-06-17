@@ -412,6 +412,32 @@ def confirm_case_review(requirement_id: int):
 
 
 # ---------------------------------------------------------------------------
+# confirm_code_review — mark code review gate confirmed & resume
+# ---------------------------------------------------------------------------
+
+
+def confirm_code_review(requirement_id: int):
+    """Mark the code review confirmation as done and resume report generation."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    requirement = db.session.get(Requirement, requirement_id)
+    if not requirement:
+        raise NotFoundError(f"Requirement {requirement_id} not found")
+
+    structured = requirement.structured_data or {}
+    if not isinstance(structured, dict):
+        structured = {}
+    review_confirmation = structured.get("review_confirmation") or {}
+    review_confirmation["confirmed"] = True
+    structured["review_confirmation"] = review_confirmation
+    requirement.structured_data = structured
+    flag_modified(requirement, "structured_data")
+    db.session.commit()
+
+    return resume_flow(requirement_id)
+
+
+# ---------------------------------------------------------------------------
 # re_execute_requirement — re-run all scripts for regression testing
 # ---------------------------------------------------------------------------
 

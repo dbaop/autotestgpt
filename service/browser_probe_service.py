@@ -112,14 +112,14 @@ class BrowserProbe:
 
     def _try_mcp_connect(self) -> bool:
         try:
-            from service.cdp_bridge_client import CdpBridgeClient
-            self._mcp_client = CdpBridgeClient(self._cdp_mcp_url)
+            from service.playwright_mcp_client import PlaywrightMCPClient
+            self._mcp_client = PlaywrightMCPClient()
             if self._mcp_client.initialize():
                 self._mode = "mcp"
-                logger.info("Connected via CDP Bridge MCP at %s", self._cdp_mcp_url)
+                logger.info("Connected via Playwright MCP (npx @playwright/mcp)")
                 return True
         except Exception as exc:
-            logger.info("CDP Bridge MCP not available (%s), trying next backend...", exc)
+            logger.info("Playwright MCP not available (%s), trying next backend...", exc)
         self._mcp_client = None
         return False
 
@@ -144,39 +144,66 @@ class BrowserProbe:
             if self._playwright is None:
                 self._playwright = sync_playwright().start()
 
-            # Try user's real Chrome profile first (for DingTalk cookies)
-            user_data_dir = None
+            # Strategy: try connecting to user's running Chrome via CDP first,
+            # since the profile is locked when Chrome is already running and
+            # we can't launch_persistent_context with it.
             chrome_profile = _find_chrome_profile()
+
+            # Attempt 1: user's Chrome already running with debug port?
+            try:
+                self._browser = self._playwright.chromium.connect_over_cdp(
+                    self._cdp_endpoint, timeout=3000
+                )
+                pages = self._browser.contexts[0].pages if self._browser.contexts else []
+                self._page = pages[0] if pages else self._browser.contexts[0].new_page()
+                self._mode = "cdp"
+                logger.info("Connected to existing Chrome via CDP at %s", self._cdp_endpoint)
+                return True
+            except Exception:
+                pass
+
+            # Attempt 2: user profile (works when Chrome is NOT running)
             if chrome_profile:
                 try:
                     context = self._playwright.chromium.launch_persistent_context(
                         chrome_profile,
                         headless=False,
-                        args=["--no-sandbox", "--disable-setuid-sandbox"],
+                        args=[
+                            "--no-sandbox", "--disable-setuid-sandbox",
+                            f"--remote-debugging-port=9222",  # expose CDP for reuse
+                        ],
                         viewport={"width": 1440, "height": 900},
                     )
-                    user_data_dir = chrome_profile
-                    logger.info("Using user Chrome profile: %s", user_data_dir)
+                    self._browser = context
+                    pages = context.pages
+                    self._page = pages[0] if pages else context.new_page()
+                    self._mode = "standalone"
+                    logger.info("Using user Chrome profile: %s (CDP on :9222)", chrome_profile)
+                    return True
                 except Exception as exc:
-                    logger.info("User Chrome profile locked (Chrome is running): %s. Falling back...", exc)
+                    logger.info("User Chrome profile locked: %s", exc)
 
-            # Fallback: workspace profile
-            if user_data_dir is None:
-                _USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-                user_data_dir = str(_USER_DATA_DIR)
-                context = self._playwright.chromium.launch_persistent_context(
-                    user_data_dir,
-                    headless=False,
-                    args=["--no-sandbox", "--disable-setuid-sandbox"],
-                    viewport={"width": 1440, "height": 900},
-                )
-                logger.info("Using workspace profile: %s", user_data_dir)
-
+            # Attempt 3: workspace profile (clean browser, no cookies)
+            _USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+            context = self._playwright.chromium.launch_persistent_context(
+                str(_USER_DATA_DIR),
+                headless=False,
+                args=[
+                    "--no-sandbox", "--disable-setuid-sandbox",
+                    f"--remote-debugging-port=9222",
+                ],
+                viewport={"width": 1440, "height": 900},
+            )
             self._browser = context
             pages = context.pages
             self._page = pages[0] if pages else context.new_page()
             self._mode = "standalone"
-            logger.info("Launched Chromium (profile: %s)", user_data_dir)
+            logger.info(
+                "Using workspace profile: %s (Chrome is running, profile locked. "
+                "Login state unavailable — close Chrome before running tests to "
+                "preserve cookies, or start Chrome with --remote-debugging-port=9222)",
+                str(_USER_DATA_DIR),
+            )
             return True
         except Exception as exc:
             logger.error("Failed to launch Chromium: %s", exc)
@@ -218,6 +245,13 @@ class BrowserProbe:
 
     def navigate(self, url: str) -> Dict[str, Any]:
         """Navigate to *url* and return page metadata after stabilisation."""
+        # Opportunistically try to upgrade to MCP before navigating.
+        # This is a cheap HTTP check — if the bridge is down it returns
+        # False immediately; if it's up we switch from standalone/CDP to
+        # the user's real Chrome (with auth cookies).  Critical for
+        # scenarios where the bridge starts after the first browser op.
+        self.prefer_mcp()
+
         if self._mode == "mcp" and self._mcp_client:
             result = self._mcp_client.navigate(url)
             if result.get("ok"):

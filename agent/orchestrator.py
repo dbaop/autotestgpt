@@ -139,6 +139,18 @@ class ConversationOrchestrator:
             yield from self._drive(conversation_id, requirement)
             return
 
+        # ---- Code review gate reply: user confirmed review findings, continue report generation ----
+        if (
+            requirement
+            and requirement.status == "executed"
+            and self._review_confirmation_emitted(requirement)
+            and not self._review_confirmation_done(requirement)
+        ):
+            self._parse_review_confirmation_reply(requirement, user_message, conversation_id)
+            self._clear_waiting(requirement_id)
+            yield from self._drive(conversation_id, requirement)
+            return
+
         # ---- pending 阶段：先记录环境配置（若有），提示用户开始 ----
         if requirement is None or requirement.status == "pending":
             env_saved = self._try_save_env_from_message(requirement, user_message, conversation_id)
@@ -446,6 +458,26 @@ class ConversationOrchestrator:
             db.session.add(ts)
         db.session.commit()
         logger.info("Saved %d ui_cdp DSL scripts for req %d", len(dsl_scripts), requirement_id)
+
+    @staticmethod
+    def _prepare_scripts_for_persistence(scripts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Normalize script metadata before FlowDataAccess persists it.
+
+        UI scripts from CodeAgent are Python Playwright deliverables. They are
+        kept for reference, but CDP execution must use the sibling `ui_cdp` DSL
+        row. Mark Playwright deliverables as non-pytest scripts even when they
+        do not carry a DSL.
+        """
+        prepared: List[Dict[str, Any]] = []
+        for script in scripts:
+            if not isinstance(script, dict):
+                continue
+            normalized = dict(script)
+            framework = str(normalized.get("framework") or "").lower()
+            if framework == "playwright":
+                normalized["language"] = "playwright"
+            prepared.append(normalized)
+        return prepared
 
     def _fallback_generate_scripts(self, requirement: Requirement, conversation_id: int) -> bool:
         """Synthesize minimal executable scripts from DB test cases when CodeAgent
@@ -794,6 +826,110 @@ class ConversationOrchestrator:
         self._mark_case_review_confirmed(requirement)
 
     # ------------------------------------------------------------------
+    # Code review gate — user reviews code findings before final report
+    # ------------------------------------------------------------------
+
+    def _review_confirmation_emitted(self, requirement: Requirement) -> bool:
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            return False
+        return bool(structured.get("review_confirmation", {}).get("emitted"))
+
+    def _review_confirmation_done(self, requirement: Requirement) -> bool:
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            return False
+        return bool(structured.get("review_confirmation", {}).get("confirmed"))
+
+    def _mark_review_confirmed(self, requirement: Requirement):
+        from sqlalchemy.orm.attributes import flag_modified
+
+        structured = requirement.structured_data or {}
+        if not isinstance(structured, dict):
+            structured = {}
+        review_confirmation = structured.get("review_confirmation") or {}
+        review_confirmation["confirmed"] = True
+        structured["review_confirmation"] = review_confirmation
+        requirement.structured_data = structured
+        flag_modified(requirement, "structured_data")
+        db.session.commit()
+        logger.info("Code review confirmed for req %d", requirement.id)
+
+    def _parse_review_confirmation_reply(
+        self, requirement: Requirement, user_message: str, conversation_id: int
+    ):
+        self._mark_review_confirmed(requirement)
+
+    def _store_review_confirmation(
+        self,
+        requirement: Requirement,
+        review_task_id: int,
+        finding_count: int,
+        status: str = "completed",
+    ):
+        from sqlalchemy.orm.attributes import flag_modified
+
+        structured = requirement.structured_data or {}
+        progress = requirement.execution_progress or {}
+        if not isinstance(structured, dict):
+            structured = {}
+        if not isinstance(progress, dict):
+            progress = {}
+
+        review_confirmation = structured.get("review_confirmation") or {}
+        review_confirmation.update(
+            {
+                "emitted": True,
+                "confirmed": bool(review_confirmation.get("confirmed")),
+                "task_id": review_task_id,
+                "finding_count": finding_count,
+                "status": status,
+            }
+        )
+        structured["review_confirmation"] = review_confirmation
+
+        review_progress = progress.get("review") or {}
+        review_progress.update(
+            {
+                "task_id": review_task_id,
+                "finding_count": finding_count,
+                "status": status,
+            }
+        )
+        progress["review"] = review_progress
+
+        requirement.structured_data = structured
+        requirement.execution_progress = progress
+        flag_modified(requirement, "structured_data")
+        flag_modified(requirement, "execution_progress")
+        db.session.commit()
+
+    def _emit_review_confirmation_gate(
+        self,
+        conversation_id: int,
+        requirement: Requirement,
+        review_task_id: int,
+        finding_count: int,
+    ) -> Generator[Dict[str, Any], None, None]:
+        review_url = "/reviews"
+        detail_url = f"/requirements/{requirement.id}"
+        question = (
+            "## 代码 Review 已完成 :white_check_mark:\n\n"
+            f"Review 任务 **#{review_task_id}** 已完成，发现 **{finding_count}** 条 finding。\n\n"
+            f":point_right: [查看代码 Review 结果]({review_url})，也可以回到 [需求详情]({detail_url}) 点击确认。\n\n"
+            "确认 findings 已查看后，回复「**确认**」或「继续」生成最终报告。"
+        )
+        event = {
+            "type": "question",
+            "question": question,
+            "context": "reviewing_code",
+        }
+        self._handle_question(requirement, "reviewing", "router", [], event)
+        self._save_agent_message(conversation_id, "router", question)
+        yield event
+        yield {"type": "done"}
+
+    # ------------------------------------------------------------------
     # Deterministic execution
     # ------------------------------------------------------------------
 
@@ -961,33 +1097,59 @@ class ConversationOrchestrator:
         from flow.test_flow import FlowDataAccess
 
         structured = requirement.structured_data or {}
+        progress = requirement.execution_progress or {}
         review = structured.get("review") or {} if isinstance(structured, dict) else {}
-        review_task_id = None
+        review_confirmation = (
+            structured.get("review_confirmation") or {}
+            if isinstance(structured, dict) else {}
+        )
+        progress_review = (
+            progress.get("review") or {}
+            if isinstance(progress, dict) else {}
+        )
+        review_task_id = (
+            review_confirmation.get("task_id")
+            or progress_review.get("task_id")
+        )
 
         if review.get("enabled") and (review.get("repo_url") or review.get("repo_path")):
-            try:
-                from service.review_service import run_review_task
+            if not review_task_id:
+                try:
+                    from service.review_service import run_review_task
 
-                task = FlowDataAccess.create_review_task(
-                    review.get("repo_url", ""),
-                    review.get("branch", "main"),
-                    int(review.get("days") or 7),
-                    repo_path=review.get("repo_path", ""),
-                    repo_type="local" if review.get("repo_path") else "remote",
+                    task = FlowDataAccess.create_review_task(
+                        review.get("repo_url", ""),
+                        review.get("branch", "main"),
+                        int(review.get("days") or 7),
+                        repo_path=review.get("repo_path", ""),
+                        repo_type="local" if review.get("repo_path") else "remote",
+                    )
+                    run_review_task(task.id)
+                    review_task_id = task.id
+                    count = FlowDataAccess.count_review_findings(task.id)
+                    self._store_review_confirmation(requirement, task.id, count)
+                    review_msg = f"代码审查完成，发现 {count} 条问题。"
+                    self._save_agent_message(conversation_id, "review_agent", review_msg)
+                    yield {"type": "message", "complete": True, "content": review_msg}
+                except Exception as exc:
+                    logger.error("Code review failed (non-fatal): %s", exc)
+                    yield {
+                        "type": "message",
+                        "complete": True,
+                        "content": f"代码审查执行失败，已跳过：{exc}",
+                    }
+                    review_task_id = None
+            else:
+                count = FlowDataAccess.count_review_findings(int(review_task_id))
+
+            if review_task_id and not self._review_confirmation_done(requirement):
+                yield from self._emit_review_confirmation_gate(
+                    conversation_id,
+                    requirement,
+                    int(review_task_id),
+                    count,
                 )
-                run_review_task(task.id)
-                review_task_id = task.id
-                count = FlowDataAccess.count_review_findings(task.id)
-                review_msg = f"代码审查完成，发现 {count} 条问题。"
-                self._save_agent_message(conversation_id, "review_agent", review_msg)
-                yield {"type": "message", "complete": True, "content": review_msg}
-            except Exception as exc:
-                logger.error("Code review failed (non-fatal): %s", exc)
-                yield {
-                    "type": "message",
-                    "complete": True,
-                    "content": f"代码审查执行失败，已跳过：{exc}",
-                }
+                return
 
         try:
             from service.defect_service import defect_service
@@ -1611,33 +1773,7 @@ class ConversationOrchestrator:
             elif artifact_key == "test_scripts":
                 scripts = (artifact_data or {}).get("scripts", [])
                 if scripts:
-                    # After case review gate, only persist scripts for UI test cases.
-                    # Match using the same logic as FlowDataAccess.save_scripts:
-                    #   script_id ∈ case.title   (e.g., "TC-001" in "TC-001 验证菜单")
-                    try:
-                        from models import TestCase as _TC
-                        all_cases = _TC.query.filter_by(
-                            requirement_id=requirement.id
-                        ).all()
-                        ui_case_titles = {
-                            c.title for c in all_cases
-                            if (c.test_type or "").lower() == "ui"
-                        }
-                        if ui_case_titles:
-                            filtered = []
-                            for s in scripts:
-                                sid = str(s.get("id", ""))
-                                # Match: script id appears inside a UI case title
-                                matched = any(sid in t for t in ui_case_titles)
-                                if matched:
-                                    filtered.append(s)
-                            scripts = filtered
-                            logger.info(
-                                "Filtered scripts to %d UI-only for req %d",
-                                len(scripts), requirement.id,
-                            )
-                    except Exception:
-                        pass  # non-fatal; save whatever CodeAgent returned
+                    scripts = self._prepare_scripts_for_persistence(scripts)
                     if scripts:
                         # Playwright/pytest scripts (deliverables + API executables)
                         FlowDataAccess.save_scripts(scripts, requirement.id)
@@ -1646,7 +1782,7 @@ class ConversationOrchestrator:
                         logger.info("Saved %d test scripts for req %d", len(scripts), requirement.id)
                     else:
                         logger.warning(
-                            "No UI scripts to save for req %d (all %d scripts filtered)",
+                            "No valid test scripts to save for req %d (received %d)",
                             requirement.id,
                             len((artifact_data or {}).get("scripts", [])),
                         )

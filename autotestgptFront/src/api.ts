@@ -299,6 +299,7 @@ export const flowApi = {
   resume: (requirementId: number) => api.post<FlowResumeResponse>(`/flow/resume/${requirementId}`),
   cancel: (requirementId: number) => api.post<{ message: string; requirement_id: number; status: string }>(`/flow/cancel/${requirementId}`),
   confirmCases: (requirementId: number) => api.post<FlowResumeResponse>(`/flow/confirm-cases/${requirementId}`),
+  confirmReview: (requirementId: number) => api.post<FlowResumeResponse>(`/flow/confirm-review/${requirementId}`),
   reExecute: (requirementId: number) => api.post<FlowResumeResponse>(`/flow/re-execute/${requirementId}`),
   status: (requirementId: number) => api.get<{ requirement_id: number; db_status: string; flow_status: string; execution_progress: any }>(`/flow/status/${requirementId}`),
   retryScript: (scriptId: number) => api.post<{ message: string; script_id: number; status: string; execution_time: number; error?: string }>(`/flow/retry-script/${scriptId}`),

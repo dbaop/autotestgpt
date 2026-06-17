@@ -11,6 +11,7 @@ from models import (
     ExecutionRecord,
     FinalReport,
     FixSuggestion,
+    Message,
     Requirement,
     TestCase,
     TestScript,
@@ -161,9 +162,16 @@ def delete_requirement(req_id: int):
     AgentEvent.query.filter_by(requirement_id=req_id).delete()
     FinalReport.query.filter_by(requirement_id=req_id).delete()
     DefectCandidate.query.filter_by(requirement_id=req_id).delete()
-    # Conversation.requirement_id is nullable; we delete the conversation (and
-    # its messages cascade) since it was auto-created for this requirement.
-    Conversation.query.filter_by(requirement_id=req_id).delete()
+    # Conversation bulk delete bypasses ORM cascade to messages, so
+    # delete messages first, then conversations.  (Message rows can also
+    # exist without a requirement-backed conversation, so this is safe.)
+    conv_ids = [
+        c.id for c in
+        Conversation.query.filter_by(requirement_id=req_id).with_entities(Conversation.id).all()
+    ]
+    if conv_ids:
+        Message.query.filter(Message.conversation_id.in_(conv_ids)).delete(synchronize_session="fetch")
+        Conversation.query.filter(Conversation.id.in_(conv_ids)).delete(synchronize_session="fetch")
     # TestCase cascades via Requirement.test_cases (cascade='all, delete-orphan'),
     # but we flush first to avoid any FK ordering surprises.
     db.session.flush()

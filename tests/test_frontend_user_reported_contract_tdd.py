@@ -376,6 +376,227 @@ def test_orchestrator_executes_api_python_scripts_before_report():
         db.session.remove()
 
 
+def test_orchestrator_persists_ui_dsl_when_case_title_lacks_script_id():
+    """CaseAgent returns a separate case id, but FlowDataAccess only stores the
+    human title. UI script persistence must not drop executable DSL scripts just
+    because the generated title does not include the script id."""
+    app = _orch_app("pytest_orch_ui_dsl_title_without_id")
+
+    from agent.orchestrator import ConversationOrchestrator
+    from models import Conversation, Requirement, TestCase, TestScript, db
+
+    with app.app_context():
+        db.create_all()
+        req = Requirement(
+            title="UI login", description="d", raw_text="r",
+            structured_data={}, status="cases_generated",
+        )
+        db.session.add(req)
+        db.session.flush()
+        conv = Conversation(title="c", requirement_id=req.id)
+        db.session.add(conv)
+        case = TestCase(
+            requirement_id=req.id,
+            title="用户手机号验证码登录成功",
+            description="ui",
+            test_type="ui",
+            priority="high",
+        )
+        db.session.add(case)
+        db.session.commit()
+
+        orch = ConversationOrchestrator()
+        orch._handle_artifact(
+            req,
+            "test_scripts",
+            {
+                "scripts": [
+                    {
+                        "id": "TC-001",
+                        "title": "登录成功脚本",
+                        "language": "python",
+                        "framework": "playwright",
+                        "code": "def test_login():\n    assert True\n",
+                        "dsl": {
+                            "given": {"action": "navigate", "url": "/"},
+                            "when": [],
+                            "then": [{"type": "element_visible", "selector": "body"}],
+                        },
+                    }
+                ]
+            },
+            conv.id,
+        )
+
+        db.session.refresh(req)
+        scripts = TestScript.query.filter_by(test_case_id=case.id).all()
+        assert req.status == "code_generated"
+        assert any((script.script_type or "").lower() == "ui_cdp" for script in scripts)
+
+        db.session.remove()
+
+
+def test_orchestrator_keeps_ui_playwright_without_dsl_non_executable():
+    """A UI Playwright deliverable without a CDP DSL must remain a skipped
+    reference artifact, even when the script id matches the case title."""
+    app = _orch_app("pytest_orch_ui_without_dsl_non_exec")
+
+    from agent.orchestrator import ConversationOrchestrator
+    from models import Conversation, Requirement, TestCase, TestScript, db
+
+    with app.app_context():
+        db.create_all()
+        req = Requirement(
+            title="UI login", description="d", raw_text="r",
+            structured_data={}, status="cases_generated",
+        )
+        db.session.add(req)
+        db.session.flush()
+        conv = Conversation(title="c", requirement_id=req.id)
+        db.session.add(conv)
+        case = TestCase(
+            requirement_id=req.id,
+            title="TC-001 用户手机号验证码登录成功",
+            description="ui",
+            test_type="ui",
+            priority="high",
+        )
+        db.session.add(case)
+        db.session.commit()
+
+        orch = ConversationOrchestrator()
+        orch._handle_artifact(
+            req,
+            "test_scripts",
+            {
+                "scripts": [
+                    {
+                        "id": "TC-001",
+                        "title": "登录成功脚本",
+                        "language": "python",
+                        "framework": "playwright",
+                        "code": "def test_login():\n    assert True\n",
+                    }
+                ]
+            },
+            conv.id,
+        )
+
+        script = TestScript.query.filter_by(test_case_id=case.id).one()
+        assert script.script_type == "playwright"
+
+        db.session.remove()
+
+
+def test_orchestrator_pauses_for_code_review_confirmation_before_report(monkeypatch):
+    """When code review is enabled, the orchestrator should pause after the
+    review task finishes so the user can inspect findings before report
+    generation."""
+    app = _orch_app("pytest_orch_review_confirmation_gate")
+
+    from agent.orchestrator import ConversationOrchestrator
+    from models import AgentEvent, CodeReviewFinding, CodeReviewTask, Conversation, FinalReport, Requirement, db
+
+    with app.app_context():
+        db.create_all()
+        req = Requirement(
+            title="Review gate", description="d", raw_text="r",
+            structured_data={
+                "review": {
+                    "enabled": True,
+                    "repo_url": "https://example.test/repo.git",
+                    "branch": "main",
+                    "days": 1,
+                }
+            },
+            execution_progress={"total": 1, "executed": 1, "completed": True},
+            status="executed",
+        )
+        db.session.add(req)
+        db.session.flush()
+        conv = Conversation(title="c", requirement_id=req.id)
+        db.session.add(conv)
+        db.session.commit()
+
+        def fake_run_review_task(task_id):
+            task = db.session.get(CodeReviewTask, task_id)
+            task.status = "completed"
+            task.summary = "review finished"
+            db.session.add(CodeReviewFinding(task_id=task_id, severity="high", title="Risk", detail="detail"))
+            db.session.commit()
+            return {"status": "completed", "task_id": task_id, "findings": 1}
+
+        monkeypatch.setattr("service.review_service.run_review_task", fake_run_review_task)
+
+        orch = ConversationOrchestrator()
+        events = list(orch._finalize_with_report(conv.id, req))
+
+        db.session.refresh(req)
+        review_confirmation = req.structured_data["review_confirmation"]
+        assert req.status == "executed"
+        assert review_confirmation["emitted"] is True
+        assert review_confirmation["confirmed"] is False
+        assert review_confirmation["task_id"]
+        assert (req.execution_progress or {})["review"]["task_id"] == review_confirmation["task_id"]
+        assert AgentEvent.query.filter_by(requirement_id=req.id, event_type="waiting_user").count() == 1
+        assert FinalReport.query.filter_by(requirement_id=req.id).count() == 0
+        assert any(event.get("type") == "question" and "/reviews" in event.get("question", "") for event in events)
+
+        db.session.remove()
+
+
+def test_orchestrator_chat_reply_confirms_code_review_and_generates_report():
+    """The chat confirmation reply should mark the review gate done and continue
+    to final report generation without re-running code review."""
+    app = _orch_app("pytest_orch_review_confirmation_reply")
+
+    from agent.orchestrator import ConversationOrchestrator
+    from models import AgentEvent, CodeReviewFinding, CodeReviewTask, Conversation, FinalReport, Requirement, db
+
+    with app.app_context():
+        db.create_all()
+        review_task = CodeReviewTask(repo_url="https://example.test/repo.git", branch="main", days=1, status="completed", summary="review finished")
+        db.session.add(review_task)
+        db.session.flush()
+        req = Requirement(
+            title="Review reply", description="d", raw_text="r",
+            structured_data={
+                "review": {"enabled": True, "repo_url": "https://example.test/repo.git", "branch": "main", "days": 1},
+                "review_confirmation": {
+                    "emitted": True,
+                    "confirmed": False,
+                    "task_id": review_task.id,
+                },
+            },
+            execution_progress={
+                "total": 1,
+                "executed": 1,
+                "completed": True,
+                "review": {"task_id": review_task.id, "finding_count": 1},
+            },
+            status="executed",
+        )
+        db.session.add(req)
+        db.session.flush()
+        db.session.add(CodeReviewFinding(task_id=review_task.id, severity="high", title="Risk", detail="detail"))
+        conv = Conversation(title="c", requirement_id=req.id)
+        db.session.add(conv)
+        db.session.add(AgentEvent(requirement_id=req.id, agent="router", event_type="waiting_user", message="review gate"))
+        db.session.commit()
+
+        orch = ConversationOrchestrator()
+        events = list(orch.handle_message(conv.id, "确认"))
+
+        db.session.refresh(req)
+        assert req.status == "completed"
+        assert req.structured_data["review_confirmation"]["confirmed"] is True
+        assert FinalReport.query.filter_by(requirement_id=req.id, review_task_id=review_task.id).count() == 1
+        assert AgentEvent.query.filter_by(requirement_id=req.id, event_type="waiting_user").count() == 0
+        assert any(event.get("key") == "final_report" for event in events)
+
+        db.session.remove()
+
+
 def test_orchestrator_does_not_mark_executed_when_no_executable_scripts_exist():
     """A UI Playwright deliverable without a ui_cdp DSL is not automatically
     executable. The orchestrator must stop in an error state instead of moving
@@ -428,4 +649,3 @@ def test_orchestrator_does_not_mark_executed_when_no_executable_scripts_exist():
         assert any(event.get("type") == "error" for event in events)
 
         db.session.remove()
-

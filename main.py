@@ -235,18 +235,10 @@ def _ensure_cdp_bridge_server():
         resp.read()
         app.logger.info("CDP Bridge MCP server already running at localhost:18700")
     except Exception:
-        app.logger.info("Starting CDP Bridge MCP server (uvx cdp-bridge@latest)...")
-        import subprocess, os
-        try:
-            subprocess.Popen(
-                ["uvx", "cdp-bridge@latest", "--transport", "streamable-http",
-                 "--port", "18700", "--ws-port", "18765"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-            app.logger.info("CDP Bridge MCP server started on port 18700")
-        except Exception as exc:
-            app.logger.warning("Could not start CDP Bridge MCP server: %s", exc)
+        app.logger.info(
+            "Playwright MCP will be started on-demand by browser probe "
+            "(npx @playwright/mcp@latest via stdio)"
+        )
 
 _ensure_cdp_bridge_server()
 

@@ -129,6 +129,7 @@ export default function RequirementDetail() {
   const [fixSuggestions, setFixSuggestions] = useState<FixSuggestion[]>([])
   const [generatingReport, setGeneratingReport] = useState(false)
   const [generatingFixes, setGeneratingFixes] = useState(false)
+  const [confirmingReview, setConfirmingReview] = useState(false)
   const [retryingScriptIds, setRetryingScriptIds] = useState<Set<number>>(new Set())
   const pollingRef = useRef<number | null>(null)
 
@@ -155,15 +156,21 @@ export default function RequirementDetail() {
     return () => { if (pollingRef.current) window.clearInterval(pollingRef.current) }
   }, [loadData])
 
+  const reviewConfirmation = requirement?.structured_data?.review_confirmation || null
+  const isReviewConfirmationPending = requirement?.status === 'executed'
+    && Boolean(reviewConfirmation?.emitted)
+    && !reviewConfirmation?.confirmed
+
   useEffect(() => {
     if (!requirement) return
     const shouldPoll = ['pending', 'parsed', 'cases_generated', 'code_generated', 'executing'].includes(requirement.status)
+      || isReviewConfirmationPending
     if (shouldPoll && !pollingRef.current) {
       pollingRef.current = window.setInterval(() => loadData(), 3000)
     } else if (!shouldPoll && pollingRef.current) {
       window.clearInterval(pollingRef.current); pollingRef.current = null
     }
-  }, [loadData, requirement])
+  }, [isReviewConfirmationPending, loadData, requirement])
 
   const currentStep = useMemo(() => {
     if (!requirement) return 0
@@ -211,6 +218,24 @@ export default function RequirementDetail() {
     catch (err: any) { setError(err.response?.data?.message || err.response?.data?.error || '重试脚本失败') }
     finally {
       setRetryingScriptIds(prev => { const n = new Set(prev); n.delete(scriptId); return n })
+    }
+  }
+
+  const handleConfirmReview = async () => {
+    if (!requirement) return
+    if (!window.confirm('确认已查看代码 Review finding，并继续生成最终报告？')) return
+    setConfirmingReview(true); setError(null)
+    try {
+      const res = await flowApi.confirmReview(requirement.id)
+      if (res.data.conversation_id) {
+        navigate('/chat', { state: { conversationId: res.data.conversation_id } })
+      } else {
+        await loadData(true)
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.message || err.response?.data?.error || '确认 Review 失败')
+    } finally {
+      setConfirmingReview(false)
     }
   }
 
@@ -556,6 +581,41 @@ export default function RequirementDetail() {
             <p style={{ fontFamily: C.body, fontSize: 12, color: C.text2, margin: 0, lineHeight: 1.5 }}>
               选择已完成的 Review 任务，生成报告时串联需求、用例、finding 和执行结果。
             </p>
+
+            {isReviewConfirmationPending && (
+              <div style={{
+                marginTop: 16, padding: '14px 16px', borderRadius: 10,
+                border: '1px solid rgba(245,158,11,0.35)',
+                background: 'rgba(245,158,11,0.08)',
+              }}>
+                <div style={{ fontFamily: C.mono, fontSize: 10, letterSpacing: '0.16em', textTransform: 'uppercase', color: C.amber, marginBottom: 8 }}>
+                  review confirmation
+                </div>
+                <p style={{ fontFamily: C.body, fontSize: 12, color: C.text2, margin: 0, lineHeight: 1.55 }}>
+                  代码 Review 已完成，任务 #{reviewConfirmation?.task_id || '--'}，
+                  finding {reviewConfirmation?.finding_count ?? '--'} 条。确认后将继续生成最终报告。
+                </p>
+                <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+                  <Link to="/reviews" style={{
+                    fontFamily: C.mono, fontSize: 11, fontWeight: 700,
+                    color: C.amber, textDecoration: 'none',
+                    border: '1px solid rgba(245,158,11,0.35)', borderRadius: 100,
+                    padding: '8px 14px', background: 'rgba(245,158,11,0.06)',
+                  }}>
+                    查看 Review
+                  </Link>
+                  <button type="button" onClick={handleConfirmReview} disabled={confirmingReview} style={{
+                    fontFamily: C.mono, fontSize: 11, fontWeight: 800,
+                    color: '#050810', background: 'var(--accent-amber)',
+                    border: 'none', borderRadius: 100, padding: '8px 14px',
+                    cursor: confirmingReview ? 'not-allowed' : 'pointer',
+                    opacity: confirmingReview ? 0.6 : 1,
+                  }}>
+                    {confirmingReview ? '确认中...' : '确认并生成报告'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             <select value={selectedReviewTaskId} onChange={e => setSelectedReviewTaskId(e.target.value ? Number(e.target.value) : '')}
               style={{

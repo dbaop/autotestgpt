@@ -1,0 +1,116 @@
+- generic [ref=e3]:
+  - generic:
+    - generic [ref=e6]:
+      - link "新闻" [ref=e7] [cursor=pointer]:
+        - /url: http://news.baidu.com
+      - link "hao123" [ref=e8] [cursor=pointer]:
+        - /url: https://www.hao123.com?src=from_pc
+      - link "地图" [ref=e9] [cursor=pointer]:
+        - /url: http://map.baidu.com
+      - link "贴吧" [ref=e10] [cursor=pointer]:
+        - /url: http://tieba.baidu.com/
+      - link "视频" [ref=e11] [cursor=pointer]:
+        - /url: https://haokan.baidu.com/?sfrom=baidu-top
+      - link "图片" [ref=e12] [cursor=pointer]:
+        - /url: http://image.baidu.com/
+      - link "网盘" [ref=e13] [cursor=pointer]:
+        - /url: https://pan.baidu.com?from=1026962h
+      - link "文库" [ref=e14] [cursor=pointer]:
+        - /url: https://wenku.baidu.com/?fr=bdpcindex
+      - link "文心" [ref=e15] [cursor=pointer]:
+        - /url: https://chat.baidu.com/search?isShowHello=1&pd=csaitab&setype=csaitab&extParamsJson=%7B%22enter_type%22%3A%22home_tab%22%7D
+      - link "搭子DuMate" [ref=e16] [cursor=pointer]:
+        - /url: https://dumate.cn?track=bdsy
+      - link "更多" [ref=e18] [cursor=pointer]:
+        - /url: http://www.baidu.com/more/
+    - generic [ref=e19]:
+      - generic [ref=e20] [cursor=pointer]: 设置
+      - link "登录" [ref=e21] [cursor=pointer]:
+        - /url: https://passport.baidu.com/v2/?login&tpl=mn&u=http%3A%2F%2Fwww.baidu.com%2F&sms=5
+  - generic [ref=e24]:
+    - generic [ref=e25]:
+      - img [ref=e26]
+      - generic:
+        - link "点击一下，了解更多":
+          - /url: //www.baidu.com/s?wd=%E7%99%BE%E5%BA%A6%E7%83%AD%E6%90%9C&sa=ire_dl_gh_logo_texing&rsv_dl=igh_logo_pcs
+    - generic [ref=e31]:
+      - generic [ref=e34]:
+        - textbox "美伊协议引爆市场" [active] [ref=e36]
+        - generic [ref=e38]:
+          - generic [ref=e39]:
+            - img [ref=e47] [cursor=pointer]
+            - generic [ref=e50]:
+              - img [ref=e54] [cursor=pointer]
+              - img [ref=e59] [cursor=pointer]
+          - button "百度一下" [ref=e63] [cursor=pointer]
+      - link "复杂问题就找文心助手，深入思考回答更优 " [ref=e67] [cursor=pointer]:
+        - /url: https://chat.baidu.com/search?extParams=%7B%22enter_type%22%3A%22home_operate%22%7D&isShowHello=1
+        - img [ref=e68]
+        - generic [ref=e69]:
+          - generic [ref=e70]: 复杂问题就找文心助手，深入思考回答更优
+          - generic [ref=e71]: 
+    - generic [ref=e72]:
+      - generic [ref=e73]:
+        - link "百度热搜":
+          - /url: https://top.baidu.com/board?platform=pc&sa=pcindex_entry
+          - generic "百度热搜" [ref=e74] [cursor=pointer]: 
+        - generic [ref=e75] [cursor=pointer]:
+          - generic [ref=e76]: 
+          - text: 换一换
+      - list:
+        - listitem [ref=e77]:
+          - link " 古窟承韵 脉续千秋" [ref=e78] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E5%8F%A4%E7%AA%9F%E6%89%BF%E9%9F%B5+%E8%84%89%E7%BB%AD%E5%8D%83%E7%A7%8B&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e79]: 
+            - text: 古窟承韵 脉续千秋
+        - listitem [ref=e81]:
+          - link "5 考编第一被递补 需给一个明白交代" [ref=e82] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E8%80%83%E7%BC%96%E7%AC%AC%E4%B8%80%E8%A2%AB%E9%80%92%E8%A1%A5+%E9%9C%80%E7%BB%99%E4%B8%80%E4%B8%AA%E6%98%8E%E7%99%BD%E4%BA%A4%E4%BB%A3&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e83]: "5"
+            - text: 考编第一被递补 需给一个明白交代
+          - generic [ref=e84]: 热
+        - listitem [ref=e85]:
+          - link "1 3亿北斗工程现“脆皮底座”" [ref=e86] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=3%E4%BA%BF%E5%8C%97%E6%96%97%E5%B7%A5%E7%A8%8B%E7%8E%B0%E2%80%9C%E8%84%86%E7%9A%AE%E5%BA%95%E5%BA%A7%E2%80%9D&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e87]: "1"
+            - text: 3亿北斗工程现“脆皮底座”
+          - generic [ref=e88]: 热
+        - listitem [ref=e89]:
+          - link "6 网民编造涉食品安全谣言被拘" [ref=e90] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E7%BD%91%E6%B0%91%E7%BC%96%E9%80%A0%E6%B6%89%E9%A3%9F%E5%93%81%E5%AE%89%E5%85%A8%E8%B0%A3%E8%A8%80%E8%A2%AB%E6%8B%98&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e91]: "6"
+            - text: 网民编造涉食品安全谣言被拘
+        - listitem [ref=e93]:
+          - link "2 甲亢哥预测C罗夺冠 被赶出直播间" [ref=e94] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E7%94%B2%E4%BA%A2%E5%93%A5%E9%A2%84%E6%B5%8BC%E7%BD%97%E5%A4%BA%E5%86%A0+%E8%A2%AB%E8%B5%B6%E5%87%BA%E7%9B%B4%E6%92%AD%E9%97%B4&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e95]: "2"
+            - text: 甲亢哥预测C罗夺冠 被赶出直播间
+          - generic [ref=e96]: 热
+        - listitem [ref=e97]:
+          - link "7 姆巴佩：若第一场进球就表演吹笛子" [ref=e98] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E5%A7%86%E5%B7%B4%E4%BD%A9%EF%BC%9A%E8%8B%A5%E7%AC%AC%E4%B8%80%E5%9C%BA%E8%BF%9B%E7%90%83%E5%B0%B1%E8%A1%A8%E6%BC%94%E5%90%B9%E7%AC%9B%E5%AD%90&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e99]: "7"
+            - text: 姆巴佩：若第一场进球就表演吹笛子
+          - generic [ref=e100]: 新
+        - listitem [ref=e101]:
+          - link "3 多领域发布亮眼“成绩单”" [ref=e102] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E5%A4%9A%E9%A2%86%E5%9F%9F%E5%8F%91%E5%B8%83%E4%BA%AE%E7%9C%BC%E2%80%9C%E6%88%90%E7%BB%A9%E5%8D%95%E2%80%9D&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e103]: "3"
+            - text: 多领域发布亮眼“成绩单”
+        - listitem [ref=e105]:
+          - link "8 山姆总部被约谈" [ref=e106] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E5%B1%B1%E5%A7%86%E6%80%BB%E9%83%A8%E8%A2%AB%E7%BA%A6%E8%B0%88&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e107]: "8"
+            - text: 山姆总部被约谈
+          - generic [ref=e108]: 热
+        - listitem [ref=e109]:
+          - link "4 演员署名应使用法定姓名" [ref=e110] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E6%BC%94%E5%91%98%E7%BD%B2%E5%90%8D%E5%BA%94%E4%BD%BF%E7%94%A8%E6%B3%95%E5%AE%9A%E5%A7%93%E5%90%8D&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e111]: "4"
+            - text: 演员署名应使用法定姓名
+          - generic [ref=e112]: 新
+        - listitem [ref=e113]:
+          - link "9 2岁兽皮痣患儿因痣体癌变离世" [ref=e114] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=2%E5%B2%81%E5%85%BD%E7%9A%AE%E7%97%A3%E6%82%A3%E5%84%BF%E5%9B%A0%E7%97%A3%E4%BD%93%E7%99%8C%E5%8F%98%E7%A6%BB%E4%B8%96&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e115]: "9"
+            - text: 2岁兽皮痣患儿因痣体癌变离世
