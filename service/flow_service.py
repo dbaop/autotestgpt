@@ -592,6 +592,18 @@ def resume_flow(requirement_id: int):
     }, 202
 
 
+def _build_retry_result_data(result: dict[str, Any]) -> dict[str, Any]:
+    from service.ui_heal_service import build_execution_result_payload
+
+    return build_execution_result_payload(result)
+
+
+def _build_retry_detail_extras(result: dict[str, Any]) -> dict[str, Any]:
+    from service.ui_heal_service import build_execution_detail_extras
+
+    return build_execution_detail_extras(result)
+
+
 def retry_script(script_id: int):
     import json
 
@@ -601,16 +613,20 @@ def retry_script(script_id: int):
 
     is_ui = script.script_type == "ui_cdp"
     if is_ui:
-        # CDP / UI 脚本走 DSL 引擎，不走 pytest 子进程
-        from service.ui_runner_service import run_ui_dsl
+        from service.ui_heal_service import run_ui_dsl_with_self_heal
 
         dsl = json.loads(script.script_content or "{}")
-        # Resolve test_url from the requirement's structured_data
         requirement = script.test_case.requirement if script.test_case else None
         structured = requirement.structured_data or {} if requirement else {}
         env = structured.get("test_environment") or {} if isinstance(structured, dict) else {}
         base_url = env.get("test_url", "")
-        result = run_ui_dsl(dsl, base_url=base_url, screenshot_prefix=f"ui_{script.id}_retry")
+        result = run_ui_dsl_with_self_heal(
+            dsl,
+            base_url=base_url,
+            screenshot_prefix=f"ui_{script.id}_retry",
+        )
+        if result.get("fixed_dsl"):
+            script.script_content = json.dumps(result["fixed_dsl"], ensure_ascii=False)
     else:
         exec_agent = ExecAgent()
         result = exec_agent.process(
@@ -624,7 +640,7 @@ def retry_script(script_id: int):
     record = ExecutionRecord(
         test_script_id=script.id,
         status=result.get("status", "unknown"),
-        result_data=result.get("result", {}),
+        result_data=_build_retry_result_data(result),
         error_message=result.get("error"),
         execution_time=result.get("execution_time", 0),
         report_path=result.get("report_path"),
@@ -651,6 +667,7 @@ def retry_script(script_id: int):
                     detail["execution_time"] = result.get("execution_time", 0)
                     detail["error"] = result.get("error")
                     detail["end_time"] = _now().isoformat()
+                    detail.update(_build_retry_detail_extras(result))
                     break
             flag_modified(requirement, "execution_progress")
 

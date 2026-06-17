@@ -55,6 +55,27 @@ def _capture_screenshot(probe, prefix: str) -> str | None:
 
 
 def _run_when_step(probe, step: Dict[str, Any]) -> Dict[str, Any]:
+    result = _run_when_step_once(probe, step)
+    if result.get("ok"):
+        return result
+
+    for recovery in step.get("recovery_steps") or []:
+        if not isinstance(recovery, dict):
+            continue
+        recovery_result = _run_when_step_once(probe, recovery)
+        if recovery_result.get("ok"):
+            return {
+                **recovery_result,
+                "recovered": True,
+                "via": "recovery_steps",
+                "original_action": result.get("action"),
+                "original_selector": result.get("selector"),
+            }
+
+    return result
+
+
+def _run_when_step_once(probe, step: Dict[str, Any]) -> Dict[str, Any]:
     action = (step.get("action") or "").lower()
     selector = step.get("selector", "")
     value = step.get("value", "")

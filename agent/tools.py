@@ -21,12 +21,19 @@ logger = logging.getLogger(__name__)
 def tool_search_knowledge_base(
     query: str,
     knowledge_base_ids: Optional[List[int]] = None,
+    exclude_requirement_id: Optional[int] = None,
     limit: int = 5,
 ) -> List[Dict[str, Any]]:
-    """Search the knowledge base for relevant documentation, API specs, test patterns."""
+    """Search KB entries plus historical requirements and test cases."""
     from service.knowledge_service import knowledge_service
 
-    results = knowledge_service.search_entries(query, knowledge_base_ids=knowledge_base_ids, limit=limit)
+    payload = knowledge_service.search_all_sources(
+        query,
+        knowledge_base_ids=knowledge_base_ids,
+        exclude_requirement_id=exclude_requirement_id,
+        limit=limit,
+    )
+    results = payload["items"]
     logger.info("Tool search_knowledge_base query=%r → %d results", query, len(results))
     return results
 
@@ -190,6 +197,10 @@ TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
                 "type": "array",
                 "items": {"type": "integer"},
                 "description": "Optional list of knowledge base IDs to search within",
+            },
+            "exclude_requirement_id": {
+                "type": "integer",
+                "description": "Optional current requirement ID to exclude from historical DB matches",
             },
             "limit": {"type": "integer", "description": "Maximum number of results to return", "default": 5},
         },

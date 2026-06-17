@@ -1010,6 +1010,14 @@ class ConversationOrchestrator:
             FlowDataAccess.update_script_status(script.id, "running")
             try:
                 if is_ui:
+                    from service.ui_heal_service import (
+                        attempt_ui_dsl_heal,
+                        build_execution_detail_extras,
+                        build_execution_result_payload,
+                        build_heal_sse_event,
+                        collect_recovery_step_events,
+                        is_healable_failure,
+                    )
                     from service.ui_runner_service import run_ui_dsl
 
                     dsl = json.loads(script.script_content or "{}")
@@ -1018,6 +1026,30 @@ class ConversationOrchestrator:
                         base_url=env.get("test_url", ""),
                         screenshot_prefix=f"ui_{script.id}",
                     )
+                    for heal_event in collect_recovery_step_events(result, script.id):
+                        yield heal_event
+                    if result.get("status") != "success" and is_healable_failure(result):
+                        yield build_heal_sse_event(script.id, "attempting")
+                        heal_outcome = attempt_ui_dsl_heal(
+                            dsl,
+                            result,
+                            base_url=env.get("test_url", ""),
+                            screenshot_prefix=f"ui_{script.id}",
+                        )
+                        result = heal_outcome["result"]
+                        yield build_heal_sse_event(
+                            script.id,
+                            "success" if heal_outcome.get("healed") else "failed",
+                            healed=bool(heal_outcome.get("healed")),
+                            heal_fixes=heal_outcome.get("heal_fixes"),
+                            heal_error=heal_outcome.get("heal_error"),
+                        )
+                        if heal_outcome.get("fixed_dsl"):
+                            script.script_content = json.dumps(
+                                heal_outcome["fixed_dsl"],
+                                ensure_ascii=False,
+                            )
+                            db.session.commit()
                 else:
                     result = exec_agent.process(
                         {
@@ -1029,10 +1061,14 @@ class ConversationOrchestrator:
                         }
                     )
                 status = result.get("status", "unknown")
+                from service.ui_heal_service import build_execution_detail_extras, build_execution_result_payload
+
+                result_payload = build_execution_result_payload(result)
+                detail.update(build_execution_detail_extras(result))
                 FlowDataAccess.create_execution_record(
                     test_script_id=script.id,
                     status=status,
-                    result_data=result.get("result", {}),
+                    result_data=result_payload,
                     error_message=result.get("error"),
                     execution_time=result.get("execution_time", 0),
                     report_path=result.get("report_path"),
@@ -1164,6 +1200,19 @@ class ConversationOrchestrator:
             return
 
         FlowDataAccess.update_requirement(requirement.id, status="completed", current_phase="completed")
+
+        try:
+            from service.knowledge_service import knowledge_service
+
+            index_result = knowledge_service.index_requirement(requirement.id)
+            logger.info(
+                "Indexed requirement %s into knowledge bases %s (%s entries)",
+                requirement.id,
+                index_result.get("knowledge_base_ids"),
+                index_result.get("entry_count"),
+            )
+        except Exception as exc:
+            logger.warning("Knowledge indexing failed (non-fatal): %s", exc)
 
         preview_url = f"/api/reports/{report.id}/preview"
         msg_content = (
@@ -1388,13 +1437,31 @@ class ConversationOrchestrator:
                 "Your task is to understand the user's testing needs. "
                 "IMPORTANT: You are analyzing the SYSTEM/FEATURES described in the user's input, "
                 "NOT the document/URL itself. "
-                "Use search_knowledge_base to find relevant documentation. "
+                "Use search_knowledge_base to find relevant documentation and historical cases. "
                 "If information is insufficient, use ask_user to clarify. "
                 "If you have SOME information (even just a URL or brief description), "
                 "produce a PARTIAL structured requirement and ask the user to fill gaps. "
                 "Do NOT get stuck trying to open a URL if the browser is unavailable — "
                 "ask the user to paste the document content directly."
             )
+            if requirement:
+                demand_text = (requirement.raw_text or requirement.description or "").strip()
+                if demand_text:
+                    from service.knowledge_service import knowledge_service
+
+                    kb_ids = [requirement.knowledge_base_id] if requirement.knowledge_base_id else None
+                    parse_context = knowledge_service.build_requirement_parse_context(
+                        demand_text,
+                        knowledge_base_ids=kb_ids,
+                        exclude_requirement_id=requirement.id,
+                        limit=3,
+                    )
+                    if parse_context.get("prompt_text"):
+                        base += (
+                            "\n\nHISTORICAL REFERENCE (similar past requirements/cases — supplementary only):\n"
+                            f"{parse_context['prompt_text']}\n"
+                            "Use this only to enrich interfaces/test_points; do NOT replace the user's current demand."
+                        )
             # Inject pre-extracted document content so ReqAgent has the real doc text
             if requirement and requirement.structured_data:
                 doc = requirement.structured_data.get("original_document")

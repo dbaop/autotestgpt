@@ -380,7 +380,7 @@ class AutoTestFlow:
             requirement = self.da.get_requirement(requirement_id)
             orig_doc = (requirement.structured_data or {}).get("original_document") if requirement else None
 
-            structured_req = self.req_agent.process({'demand': demand})
+            structured_req = self.req_agent.process({'demand': demand, 'requirement_id': requirement_id})
 
             # Carry forward the original_document reference for downstream agents
             if orig_doc:

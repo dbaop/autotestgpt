@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { ChatAgentContext, conversationsApi, Conversation, Message, SSEEvent, flowApi } from '../api'
+import { ChatAgentContext, conversationsApi, Conversation, HealFix, Message, SSEEvent, flowApi } from '../api'
 
 const C = {
   bg: 'var(--bg-card)',
@@ -58,6 +58,15 @@ export default function Chat() {
   const [streamingAgent, setStreamingAgent] = useState('')
   const [currentPhase, setCurrentPhase] = useState('')
   const [toolCalls, setToolCalls] = useState<{ name: string; result?: any; active: boolean }[]>([])
+  const [healEvents, setHealEvents] = useState<Array<{
+    id: string
+    script_id?: number
+    phase: 'attempting' | 'recovery' | 'success' | 'failed'
+    message: string
+    healed?: boolean
+    heal_fixes?: HealFix[]
+    heal_error?: string | null
+  }>>([])
   const [activeQuestion, setActiveQuestion] = useState<{ question: string; context: string } | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -80,7 +89,7 @@ export default function Chat() {
   // SSE connection
   const connectSSE = useCallback((convId: number) => {
     if (sseRef.current) { sseRef.current.close(); sseRef.current = null }
-    setStreamingContent(''); setStreamingAgent(''); setToolCalls([])
+    setStreamingContent(''); setStreamingAgent(''); setToolCalls([]); setHealEvents([])
     setActiveQuestion(null); setCurrentPhase('')
 
     const es = new EventSource(conversationsApi.streamUrl(convId))
@@ -121,6 +130,17 @@ export default function Chat() {
               name: `artifact:${data.key || ''}`,
               result: data.data,
               active: false,
+            }])
+            break
+          case 'heal_event':
+            setHealEvents(prev => [...prev, {
+              id: `${data.script_id || 'script'}-${data.phase || 'event'}-${Date.now()}-${prev.length}`,
+              script_id: data.script_id,
+              phase: data.phase || 'attempting',
+              message: data.message || 'UI 自愈事件',
+              healed: data.healed,
+              heal_fixes: data.heal_fixes,
+              heal_error: data.heal_error,
             }])
             break
           case 'phase_change':
@@ -189,7 +209,7 @@ export default function Chat() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, streamingContent, toolCalls])
+  }, [messages, streamingContent, toolCalls, healEvents])
 
   const loadConversations = async () => {
     try {
@@ -221,7 +241,7 @@ export default function Chat() {
       setCurrentConv(r.data)
       setMessages((r.data.messages || []).filter(isVisibleMessage))
       setAgentContext(r.data.agent_context || null)
-      setStreamingContent(''); setStreamingAgent(''); setToolCalls([])
+      setStreamingContent(''); setStreamingAgent(''); setToolCalls([]); setHealEvents([])
       setActiveQuestion(null); setCurrentPhase('')
       // 选中后清零侧栏未读
       setConversations(prev => {
@@ -590,6 +610,46 @@ export default function Chat() {
                   </span>
                 </div>
               )}
+
+              {/* Self-heal events */}
+              {healEvents.map(event => {
+                const isSuccess = event.phase === 'success' || event.phase === 'recovery'
+                const isAttempt = event.phase === 'attempting'
+                const accent = isSuccess ? C.emerald : isAttempt ? C.cyan : C.magenta
+                return (
+                  <div key={event.id} style={{
+                    display: 'flex', flexDirection: 'column', gap: 8,
+                    padding: '12px 16px', borderRadius: 12,
+                    background: `${accent}12`, border: `1px solid ${accent}33`,
+                    alignSelf: 'center', maxWidth: '85%',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontFamily: C.mono, fontSize: 11, color: accent, fontWeight: 700 }}>
+                        {isAttempt ? '↻ 自愈中' : isSuccess ? '✓ 自愈成功' : '✕ 自愈失败'}
+                      </span>
+                      {event.script_id != null && (
+                        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.text3 }}>
+                          script #{event.script_id}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontFamily: C.mono, fontSize: 11, color: C.text2, lineHeight: 1.6 }}>
+                      {event.message}
+                    </div>
+                    {(event.heal_fixes || []).map((fix, index) => (
+                      <div key={`${event.id}-fix-${index}`} style={{ fontFamily: C.mono, fontSize: 10, color: C.text3 }}>
+                        {fix.old_selector} → {fix.new_selector}
+                        {fix.reason ? ` · ${fix.reason}` : ''}
+                      </div>
+                    ))}
+                    {!isSuccess && event.heal_error && (
+                      <div style={{ fontFamily: C.mono, fontSize: 10, color: C.text3 }}>
+                        {event.heal_error}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
 
               {/* Tool call cards */}
               {toolCalls.filter(tc => tc.active || tc.result).map((tc, idx) => (

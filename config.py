@@ -25,6 +25,9 @@ class Config:
     # Feature flag: enable conversation-driven test flow (instead of rigid pipeline)
     CONVERSATION_FLOW_ENABLED = os.getenv("CONVERSATION_FLOW_ENABLED", "true").lower() != "false"
 
+    EMBEDDING_ENABLED = os.getenv("EMBEDDING_ENABLED", "false").lower() == "true"
+    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+
     DB_HOST = os.getenv("DB_HOST", "")
     DB_PORT = int(os.getenv("DB_PORT", 3306))
     DB_USER = os.getenv("DB_USER", "")

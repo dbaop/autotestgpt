@@ -93,6 +93,7 @@ def _latest_executions_for_requirement(req_id: int):
             "execution_time": rec.execution_time,
             "error": rec.error_message,
             "end_time": ts.isoformat() if ts else None,
+            **(rec.result_data or {}),
         })
     details.sort(key=lambda d: d["script_id"])
     return details

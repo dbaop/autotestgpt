@@ -88,8 +88,12 @@ class CaseAgent(ToolCapableAgent):
             "test_case_count": len(test_cases.get("test_cases", [])),
             "generated_at": self.get_timestamp(),
             "test_suite_id": test_suite.id if test_suite else None,
-            "knowledge_entry_count": len(knowledge_context.get("items", [])),
-            "knowledge_entries": knowledge_context.get("items", []),
+            "knowledge_entry_count": len(knowledge_context.get("knowledge_entries", [])),
+            "knowledge_entries": knowledge_context.get("knowledge_entries", []),
+            "historical_requirement_count": len(knowledge_context.get("historical_requirements", [])),
+            "historical_requirements": knowledge_context.get("historical_requirements", []),
+            "historical_test_case_count": len(knowledge_context.get("historical_test_cases", [])),
+            "historical_test_cases": knowledge_context.get("historical_test_cases", []),
         }
 
         self.log_processing(input_data, test_cases)
@@ -149,6 +153,7 @@ class CaseAgent(ToolCapableAgent):
         return knowledge_service.build_case_context(
             structured_req,
             knowledge_base_ids=knowledge_base_ids or None,
+            exclude_requirement_id=requirement_id,
             limit=3,
         )
 

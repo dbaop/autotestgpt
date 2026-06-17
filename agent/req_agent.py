@@ -9,6 +9,8 @@ from typing import Any, Dict, Generator, List, Optional
 from .tool_agent import ToolCapableAgent
 from .tools import format_tools_prompt
 from config import Config
+from models import db, Requirement
+from service.knowledge_service import knowledge_service
 
 logger = logging.getLogger(__name__)
 
@@ -128,14 +130,26 @@ class ReqAgent(ToolCapableAgent):
                 raise ValueError("输入数据缺少'demand'字段")
             
             demand = input_data['demand']
+            requirement_id = input_data.get("requirement_id")
             logger.info(f"开始解析需求，长度: {len(demand)}")
-            
-            # 构建提示词
-            prompt = f"""请解析以下测试需求：
 
-{demand}
-
-请按照指定的JSON格式输出结构化需求。"""
+            parse_context = self.get_parse_context(demand, requirement_id)
+            prompt_parts = [
+                "请解析以下测试需求：",
+                "",
+                demand,
+            ]
+            if parse_context.get("prompt_text"):
+                prompt_parts.extend(
+                    [
+                        "",
+                        parse_context["prompt_text"],
+                        "",
+                        "请参考以上历史资料补充接口、测试点和风险场景，但不要替换用户当前需求。",
+                    ]
+                )
+            prompt_parts.extend(["", "请按照指定的JSON格式输出结构化需求。"])
+            prompt = "\n".join(prompt_parts)
             
             # 调用大模型
             response = self.call_llm(prompt, self.system_prompt)
@@ -148,7 +162,13 @@ class ReqAgent(ToolCapableAgent):
                 'agent': 'ReqAgent',
                 'model': self.model,
                 'input_length': len(demand),
-                'output_timestamp': self.get_timestamp()
+                'output_timestamp': self.get_timestamp(),
+                'knowledge_entry_count': len(parse_context.get("knowledge_entries", [])),
+                'knowledge_entries': parse_context.get("knowledge_entries", []),
+                'historical_requirement_count': len(parse_context.get("historical_requirements", [])),
+                'historical_requirements': parse_context.get("historical_requirements", []),
+                'historical_test_case_count': len(parse_context.get("historical_test_cases", [])),
+                'historical_test_cases': parse_context.get("historical_test_cases", []),
             }
             
             # 记录处理日志
@@ -174,6 +194,20 @@ class ReqAgent(ToolCapableAgent):
         full_system = self.system_prompt + "\n\n" + tools_prompt
 
         yield from super().act(conversation_messages, full_system)
+
+    def get_parse_context(self, demand: str, requirement_id: Optional[int] = None) -> Dict[str, Any]:
+        knowledge_base_ids: List[int] = []
+        if requirement_id:
+            requirement = db.session.get(Requirement, requirement_id)
+            if requirement and requirement.knowledge_base_id:
+                knowledge_base_ids.append(requirement.knowledge_base_id)
+
+        return knowledge_service.build_requirement_parse_context(
+            demand,
+            knowledge_base_ids=knowledge_base_ids or None,
+            exclude_requirement_id=requirement_id,
+            limit=3,
+        )
 
     def _try_extract_artifact(self, response: str) -> Optional[Dict[str, Any]]:
         """Extract structured requirement from the agent response."""

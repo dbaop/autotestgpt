@@ -17,6 +17,14 @@ export interface Requirement {
   knowledge_base_id?: number | null
 }
 
+export interface HealFix {
+  old_selector: string
+  new_selector: string
+  reason?: string
+  location?: string
+  score?: number
+}
+
 export interface RequirementExecutionDetail {
   script_id: number
   script_name?: string | null
@@ -25,6 +33,10 @@ export interface RequirementExecutionDetail {
   execution_time?: number | null
   error?: string | null
   end_time?: string | null
+  heal_attempted?: boolean
+  healed?: boolean
+  heal_fixes?: HealFix[]
+  heal_error?: string | null
 }
 
 export interface RequirementDetail extends Requirement {
@@ -188,6 +200,7 @@ export type SSEEventType =
   | 'connected' | 'heartbeat'
   | 'message' | 'tool_call' | 'tool_result'
   | 'question' | 'artifact' | 'phase_change'
+  | 'heal_event'
   | 'error' | 'done' | 'stopped'
 
 export interface SSEEvent {
@@ -199,6 +212,12 @@ export interface SSEEvent {
   from?: string; to?: string; agent?: string
   message?: string
   conversation_id?: number
+  script_id?: number
+  phase?: 'attempting' | 'recovery' | 'success' | 'failed'
+  healed?: boolean
+  heal_fixes?: HealFix[]
+  heal_error?: string | null
+  via?: string
 }
 
 export interface SendMessageResponse {

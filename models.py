@@ -225,6 +225,7 @@ class KnowledgeEntry(db.Model):
     tags = db.Column(db.JSON)
     source_type = db.Column(db.String(50), default='manual')
     source_ref = db.Column(db.String(500))
+    embedding = db.Column(db.JSON)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -237,6 +238,7 @@ class KnowledgeEntry(db.Model):
             'tags': self.tags or [],
             'source_type': self.source_type,
             'source_ref': self.source_ref,
+            'has_embedding': bool(self.embedding),
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }

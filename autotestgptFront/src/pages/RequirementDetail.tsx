@@ -542,6 +542,24 @@ export default function RequirementDetail() {
                           {detail.error && (
                             <ExpandableError error={String(detail.error)} />
                           )}
+                          {detail.heal_attempted && (
+                            <div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 10, background: 'rgba(0,212,255,0.06)', border: '1px solid rgba(0,212,255,0.18)' }}>
+                              <div style={{ fontFamily: C.mono, fontSize: 10, color: 'var(--accent-cyan)', fontWeight: 700, marginBottom: 6 }}>
+                                {detail.healed ? '自愈成功' : '已尝试自愈'}
+                              </div>
+                              {(detail.heal_fixes || []).map((fix: any, index: number) => (
+                                <div key={`${detail.script_id}-heal-${index}`} style={{ fontFamily: C.mono, fontSize: 10, color: C.text2, lineHeight: 1.6 }}>
+                                  {fix.old_selector} → {fix.new_selector}
+                                  {fix.reason ? ` · ${fix.reason}` : ''}
+                                </div>
+                              ))}
+                              {!detail.healed && detail.heal_error && (
+                                <div style={{ fontFamily: C.mono, fontSize: 10, color: C.text3, marginTop: 4 }}>
+                                  {String(detail.heal_error)}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
                           <span style={{ fontFamily: C.mono, fontSize: 10, color: C.text3 }}>

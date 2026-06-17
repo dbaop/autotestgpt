@@ -80,9 +80,10 @@ def search_knowledge_entries():
     if not query:
         return jsonify({"error": "Missing required field", "message": "query is required"}), 400
 
-    items = knowledge_service.search_entries(
+    items = knowledge_service.search_all_sources(
         query=query,
         knowledge_base_ids=data.get("knowledge_base_ids") or None,
+        exclude_requirement_id=data.get("exclude_requirement_id"),
         limit=int(data.get("limit") or 5),
     )
-    return jsonify({"items": items, "total": len(items)})
+    return jsonify({"items": items["items"], "total": len(items["items"])})

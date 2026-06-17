@@ -143,6 +143,9 @@ def _ensure_all_columns():
         ('test_cases', 'methodology',
          'ALTER TABLE test_cases ADD COLUMN methodology VARCHAR(50)',
          'ALTER TABLE test_cases ADD COLUMN methodology VARCHAR(50) NULL'),
+        ('knowledge_entries', 'embedding',
+         'ALTER TABLE knowledge_entries ADD COLUMN embedding JSON',
+         'ALTER TABLE knowledge_entries ADD COLUMN embedding JSON NULL'),
     ]
     for table, col, sqlite_ddl, mysql_ddl in migrations:
         try:
