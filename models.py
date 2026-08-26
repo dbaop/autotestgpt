@@ -502,14 +502,48 @@ class FixSuggestion(db.Model):
         }
 
 
+class ModelConfig(db.Model):
+    """可用的 LLM 模型配置 — 定义系统中有哪些模型可用，以及如何连接它们。"""
+    __tablename__ = 'model_configs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False, unique=True)          # 显示名称，如 "MiniMax"
+    model_name = db.Column(db.String(100), nullable=False)                 # litellm 模型标识，如 "minimax/abab6.5s-chat"
+    provider = db.Column(db.String(50), nullable=False)                    # 供应商: minimax / deepseek / openai / volcano
+    api_base = db.Column(db.String(300))                                   # API Base URL（可选）
+    api_key_env = db.Column(db.String(100), nullable=False)                # 对应 .env 中的 key 名，如 "MINIMAX_API_KEY"
+    is_enabled = db.Column(db.Boolean, default=True)
+    sort_order = db.Column(db.Integer, default=0)                          # 排序权重
+    extra_config = db.Column(db.JSON)                                      # 扩展配置
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'model_name': self.model_name,
+            'provider': self.provider,
+            'api_base': self.api_base,
+            'api_key_env': self.api_key_env,
+            'is_enabled': self.is_enabled,
+            'sort_order': self.sort_order,
+            'extra_config': self.extra_config or {},
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class AgentConfig(db.Model):
+    """Agent 配置 — 每个 agent_type 可以选择使用哪个 ModelConfig。"""
     __tablename__ = 'agent_configs'
 
     id = db.Column(db.Integer, primary_key=True)
     agent_type = db.Column(db.String(50), nullable=False)
     project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True)
+    model_config_id = db.Column(db.Integer, db.ForeignKey('model_configs.id'), nullable=True)  # 关联模型配置
+    model_name = db.Column(db.String(100))                                  # 兼容旧字段，优先使用 model_config_id
     system_prompt = db.Column(db.Text)
-    model_name = db.Column(db.String(100))
     temperature = db.Column(db.Float, default=0.1)
     max_tokens = db.Column(db.Integer, default=4000)
     is_enabled = db.Column(db.Boolean, default=True)
@@ -517,13 +551,16 @@ class AgentConfig(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
+    model_config = db.relationship('ModelConfig', backref='agent_configs', lazy=True)
+
     def to_dict(self):
-        return {
+        result = {
             'id': self.id,
             'agent_type': self.agent_type,
             'project_id': self.project_id,
-            'system_prompt': self.system_prompt,
+            'model_config_id': self.model_config_id,
             'model_name': self.model_name,
+            'system_prompt': self.system_prompt,
             'temperature': self.temperature,
             'max_tokens': self.max_tokens,
             'is_enabled': self.is_enabled,
@@ -531,3 +568,7 @@ class AgentConfig(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
+        # 附带关联的模型配置详情
+        if self.model_config:
+            result['model_config'] = self.model_config.to_dict()
+        return result

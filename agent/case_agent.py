@@ -18,10 +18,17 @@ class CaseAgent(ToolCapableAgent):
     """Generate or reuse test cases from structured requirements."""
 
     def __init__(self):
-        super().__init__(model="gpt-4", temperature=0.1, agent_type="case_agent")
+        super().__init__(model="minimax/abab6.5s-chat", temperature=0.1, agent_type="case_agent")
         self.system_prompt = self.custom_system_prompt or """你是专业的测试用例设计师。
 必须使用中文输出测试用例内容，包括 title、description、preconditions、test_steps.action、test_steps.expected、test_data.expected_output 和 tags。
 你的测试对象是需求中描述的业务系统/功能模块，不是需求文档本身。不要生成"测试文档解析"这类用例。
+
+**关键原则（非常重要！必须遵守！）：**
+1. 你测试的是需求中描述的具体业务功能，不是通用的登录/注册流程。
+2. 只有当需求明确提到"登录"、"注册"、"认证"等功能时，才生成登录相关用例。不要自动添加"导航至登录页面"、"填写用户名密码"等通用流程。
+3. 仔细阅读需求中的 business_modules、test_points、ui_elements——测试用例必须覆盖这些具体模块。
+4. 对于 UI 测试，重点关注需求中提到的具体页面元素的跳转（导航）和按钮点击功能。
+5. 用例标题和描述必须体现具体的业务功能名称（如「推送配置」「日报预览」），不能使用泛化描述（如「页面加载」「表单提交」）。
 
 **测试方法论要求**：每条测试用例必须明确标注使用了哪种测试设计方法。根据需求特征选择合适的 methodology：
 - boundary_value：边界值分析 — 对输入/输出的边界（最小值、最大值、刚好超出边界）设计用例。适用于数值、日期、字符串长度等有明确范围的字段。
@@ -40,25 +47,30 @@ class CaseAgent(ToolCapableAgent):
   "test_cases": [
     {
       "id": "TC-001",
-      "title": "用户手机号验证码登录成功",
-      "description": "验证用户使用有效手机号和正确验证码能成功登录系统",
-      "test_type": "api",
+      "title": "验证运营日报推送配置页面的保存功能",
+      "description": "在推送配置页面填写推送时间、接收人等配置信息后点击保存按钮，验证配置成功保存并显示在列表中",
+      "test_type": "ui",
       "priority": "high",
       "methodology": "boundary_value",
-      "methodology_rationale": "测试手机号格式的边界值（11位有效号码）",
-      "preconditions": ["用户已注册", "验证码服务正常"],
+      "methodology_rationale": "测试推送时间配置的边界值（如00:00和23:59两个时间边界）",
+      "preconditions": ["用户已登录运营后台", "具有推送配置权限"],
       "test_steps": [
         {
           "step": 1,
-          "action": "调用发送验证码接口",
-          "expected": "返回成功，用户收到验证码"
+          "action": "点击运营日报菜单，进入推送配置页面",
+          "expected": "页面加载成功，显示推送配置表单"
+        },
+        {
+          "step": 2,
+          "action": "填写推送时间为09:00，选择接收人，点击保存按钮",
+          "expected": "显示保存成功提示，列表中显示新配置记录"
         }
       ],
       "test_data": {
-        "input": "手机号 13800138000",
-        "expected_output": "登录成功，返回 token"
+        "input": "推送时间 09:00，接收人 test@example.com",
+        "expected_output": "配置保存成功，返回配置列表页面"
       },
-      "tags": ["登录", "核心流程"]
+      "tags": ["推送配置", "运营日报", "核心流程"]
     }
   ]
 }"""
@@ -284,8 +296,16 @@ class CaseAgent(ToolCapableAgent):
 
     def build_prompt(self, structured_req: Dict[str, Any], knowledge_prompt: Optional[str] = None) -> str:
         prompt_parts: List[str] = []
-        prompt_parts.append(f"Requirement title: {structured_req.get('title', 'Unknown')}")
-        prompt_parts.append(f"Requirement description: {structured_req.get('description', 'Unknown')}")
+
+        # 注入核心需求标题和描述
+        title = structured_req.get("title", "")
+        description = structured_req.get("description", "")
+        if title:
+            prompt_parts.append(f"## 核心需求")
+            prompt_parts.append(f"**需求标题**: {title}")
+            prompt_parts.append(f"**需求描述**: {description}")
+            prompt_parts.append("请为以上具体需求设计测试用例，聚焦需求中提到的业务模块和功能点。")
+            prompt_parts.append("")
 
         business_modules = structured_req.get("business_modules", [])
         if business_modules:
@@ -327,6 +347,13 @@ class CaseAgent(ToolCapableAgent):
 
         if knowledge_prompt:
             prompt_parts.append(f"\n{knowledge_prompt}")
+
+        prompt_parts.append("\n## 测试范围约束（必须遵守）")
+        prompt_parts.append("1. 只测试上述 Business modules 中列出的具体业务功能模块。")
+        prompt_parts.append("2. 如果需求中没有提到「登录」「注册」「认证」，不要生成登录相关测试用例。")
+        prompt_parts.append("3. 如果需求中包含 UI elements，每个交互元素（按钮、链接、表单）至少覆盖一个用例。")
+        prompt_parts.append("4. 对于需求中提到的页面跳转（跳转/导航），必须生成对应的导航验证用例。")
+        prompt_parts.append("5. 用例标题和描述必须体现具体的业务功能名称（如「推送配置」「日报预览」），不能使用泛化描述（如「页面加载」「表单提交」）。")
 
         prompt_parts.append("\n## 测试方法论选择指南")
         prompt_parts.append("为每条用例选择最合适的 methodology 并在 methodology_rationale 中说明原因：")

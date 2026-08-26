@@ -70,6 +70,7 @@ class ReviewAgent(ToolCapableAgent):
 
     def __init__(self, review_type: str = "security_logic", **kwargs):
         kwargs.setdefault("agent_type", "review_agent")
+        kwargs.setdefault("model", "deepseek/deepseek-chat")
         super().__init__(**kwargs)
         self.review_type = review_type
         self.system_prompt = self.custom_system_prompt or (

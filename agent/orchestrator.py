@@ -1437,6 +1437,10 @@ class ConversationOrchestrator:
                 "Your task is to understand the user's testing needs. "
                 "IMPORTANT: You are analyzing the SYSTEM/FEATURES described in the user's input, "
                 "NOT the document/URL itself. "
+                "Extract SPECIFIC business module names (e.g. '推送配置', '日报预览', '历史记录', '站内消息') "
+                "rather than generic categories (e.g. '页面展示', '系统功能'). "
+                "For each module, identify the key UI interactions: navigation/jump (跳转), "
+                "button clicks (按钮点击), form inputs (表单输入). "
                 "Use search_knowledge_base to find relevant documentation and historical cases. "
                 "If information is insufficient, use ask_user to clarify. "
                 "If you have SOME information (even just a URL or brief description), "
@@ -1487,15 +1491,43 @@ class ConversationOrchestrator:
             base += (
                 "Your task is to open the target application in the browser and explore its UI. "
                 "Use browser_navigate to open the test URL. "
+                "IMPORTANT: If the site redirects to a login page, document it but ALSO "
+                "try to explore what's BEHIND the login — the actual business feature pages. "
+                "The goal is to map the REAL application pages that users will interact with "
+                "(e.g., 推送配置, 日报预览, 历史记录, 站内消息), not just the login form. "
                 "Use browser_snapshot to capture real DOM elements with their selectors. "
                 "Click through key flows and document every interactive element. "
                 "Produce a page_map artifact with accurate, real CSS selectors — do NOT guess. "
-                "If the site redirects to a login page, document the login form elements."
+                "If the site redirects to a login page, document the login form elements "
+                "but then navigate to the actual feature pages if possible."
             )
         elif phase == "designing_cases":
+            # 注入结构化需求中的具体业务模块、UI 元素和测试点
+            req_context = ""
+            if requirement and isinstance(requirement.structured_data, dict):
+                sr = requirement.structured_data.get("structured_requirement") or {}
+                if isinstance(sr, dict):
+                    modules = sr.get("business_modules", [])
+                    if modules:
+                        module_names = [m.get("name", "") for m in modules if m.get("name")]
+                        req_context += f"\nBUSINESS MODULES TO TEST: {', '.join(module_names)}"
+                    ui_els = sr.get("ui_elements", [])
+                    if ui_els:
+                        el_names = [e.get("name", "") for e in ui_els if e.get("name")]
+                        req_context += f"\nUI ELEMENTS TO TEST: {', '.join(el_names)}"
+                    test_pts = sr.get("test_points", [])
+                    if test_pts:
+                        pt_descs = [p.get("description", "") for p in test_pts[:10] if p.get("description")]
+                        req_context += f"\nTEST POINTS: {'; '.join(pt_descs)}"
+
             base += (
                 "Your task is to design detailed test cases based on the user's requirements. "
-                "Focus on the specific requirement content, not knowledge base patterns. "
+                "CRITICAL: Test cases MUST target the specific business modules and features "
+                "mentioned in the requirement — do NOT generate generic login/registration tests "
+                "unless those are explicitly part of the requirements. "
+                "Focus on the actual business features: page navigation (跳转), "
+                "button clicks (按钮点击), form interactions, and module-specific workflows. "
+                f"{req_context}"
                 "Use search_knowledge_base only as supplementary reference. "
                 "Use find_reusable_suites to check for existing suites. "
                 "Ask the user if you need clarification on test scope or priorities."
@@ -1509,6 +1541,9 @@ class ConversationOrchestrator:
                 "For each UI test case, include BOTH a Playwright `code` "
                 "(deliverable) AND a Given-When-Then `dsl` object (executed in a real browser "
                 "via CDP). Every selector MUST come from the page_map below — do NOT guess. "
+                "Each script must test the SPECIFIC business feature described in the test case "
+                "(e.g., '推送配置', '日报预览', '历史记录', '站内消息'), not generic page loads. "
+                "The `given.url` should navigate to the actual feature page, not the login page. "
                 "Use get_requirement_environment first to check for saved URLs/credentials. "
                 "Only ask the user for URLs or credentials if get_requirement_environment returns empty."
             )

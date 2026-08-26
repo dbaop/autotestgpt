@@ -1,17 +1,103 @@
 """
-Agent config & environment config routes.
+Agent config, model config & environment config routes.
 """
 
 from __future__ import annotations
 
 from flask import jsonify, request
 
-from models import AgentConfig, Requirement, db
+from models import AgentConfig, ModelConfig, Requirement, db
 from service.errors import AppError, ValidationError, NotFoundError
 
 
 # ---------------------------------------------------------------------------
-# Agent Config CRUD
+# Model Config CRUD — 管理可用的 LLM 模型
+# ---------------------------------------------------------------------------
+
+def list_model_configs():
+    configs = ModelConfig.query.order_by(ModelConfig.sort_order).all()
+    return jsonify({"items": [c.to_dict() for c in configs], "total": len(configs)})
+
+
+def create_model_config():
+    try:
+        body = request.get_json() or {}
+        name = (body.get("name") or "").strip()
+        model_name = (body.get("model_name") or "").strip()
+        provider = (body.get("provider") or "").strip()
+        api_key_env = (body.get("api_key_env") or "").strip()
+        if not name or not model_name or not provider or not api_key_env:
+            raise ValidationError("name, model_name, provider, api_key_env are required")
+
+        existing = ModelConfig.query.filter_by(name=name).first()
+        if existing:
+            raise ValidationError(f"ModelConfig '{name}' already exists")
+
+        config = ModelConfig(
+            name=name,
+            model_name=model_name,
+            provider=provider,
+            api_base=body.get("api_base"),
+            api_key_env=api_key_env,
+            is_enabled=body.get("is_enabled", True),
+            sort_order=body.get("sort_order", 0),
+            extra_config=body.get("extra_config"),
+        )
+        db.session.add(config)
+        db.session.commit()
+        return jsonify({"message": "created", "config": config.to_dict()}), 201
+    except AppError as e:
+        db.session.rollback()
+        return jsonify(e.to_dict()), e.status_code
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "MODEL_CONFIG_FAILED", "message": str(e)}), 500
+
+
+def update_model_config(config_id: int):
+    try:
+        config = db.session.get(ModelConfig, config_id)
+        if not config:
+            raise NotFoundError(f"ModelConfig {config_id} not found")
+
+        body = request.get_json() or {}
+        for key in ("name", "model_name", "provider", "api_base", "api_key_env",
+                     "is_enabled", "sort_order", "extra_config"):
+            if key in body:
+                setattr(config, key, body[key])
+
+        db.session.commit()
+        return jsonify({"message": "updated", "config": config.to_dict()})
+    except AppError as e:
+        db.session.rollback()
+        return jsonify(e.to_dict()), e.status_code
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "MODEL_CONFIG_UPDATE_FAILED", "message": str(e)}), 500
+
+
+def delete_model_config(config_id: int):
+    try:
+        config = db.session.get(ModelConfig, config_id)
+        if not config:
+            raise NotFoundError(f"ModelConfig {config_id} not found")
+        # 解除关联的 AgentConfig
+        AgentConfig.query.filter_by(model_config_id=config_id).update(
+            {AgentConfig.model_config_id: None}
+        )
+        db.session.delete(config)
+        db.session.commit()
+        return jsonify({"message": "deleted"})
+    except AppError as e:
+        db.session.rollback()
+        return jsonify(e.to_dict()), e.status_code
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "MODEL_CONFIG_DELETE_FAILED", "message": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Agent Config CRUD — 管理 Agent 配置，可选择关联 ModelConfig
 # ---------------------------------------------------------------------------
 
 def list_agent_configs():
@@ -38,10 +124,16 @@ def upsert_agent_config():
         ).first()
 
         if existing:
-            existing.system_prompt = body.get("system_prompt")
-            existing.model_name = body.get("model_name")
-            existing.temperature = body.get("temperature", existing.temperature)
-            existing.max_tokens = body.get("max_tokens", existing.max_tokens)
+            if "system_prompt" in body:
+                existing.system_prompt = body["system_prompt"]
+            if "model_config_id" in body:
+                existing.model_config_id = body["model_config_id"]
+            if "model_name" in body:
+                existing.model_name = body["model_name"]
+            if "temperature" in body:
+                existing.temperature = body["temperature"]
+            if "max_tokens" in body:
+                existing.max_tokens = body["max_tokens"]
             if "is_enabled" in body:
                 existing.is_enabled = body["is_enabled"]
             if "extra_config" in body:
@@ -51,6 +143,7 @@ def upsert_agent_config():
             config = AgentConfig(
                 agent_type=agent_type,
                 project_id=project_id,
+                model_config_id=body.get("model_config_id"),
                 system_prompt=body.get("system_prompt"),
                 model_name=body.get("model_name"),
                 temperature=body.get("temperature", 0.1),
@@ -77,7 +170,8 @@ def update_agent_config(config_id: int):
             raise NotFoundError(f"AgentConfig {config_id} not found")
 
         body = request.get_json() or {}
-        for key in ("system_prompt", "model_name", "temperature", "max_tokens", "is_enabled", "extra_config"):
+        for key in ("system_prompt", "model_config_id", "model_name", "temperature",
+                     "max_tokens", "is_enabled", "extra_config"):
             if key in body:
                 setattr(config, key, body[key])
 

@@ -75,7 +75,13 @@ api_blueprint.add_url_rule('/flow/confirm-review/<int:req_id>', view_func=flow.c
 api_blueprint.add_url_rule('/flow/re-execute/<int:req_id>', view_func=flow.re_execute_test_flow, methods=['POST'])
 api_blueprint.add_url_rule('/flow/retry-script/<int:script_id>', view_func=flow.retry_test_script, methods=['POST'])
 
-# Agent config
+# Model configs
+api_blueprint.add_url_rule('/model-configs', view_func=agent_config.list_model_configs, methods=['GET'])
+api_blueprint.add_url_rule('/model-configs', view_func=agent_config.create_model_config, methods=['POST'])
+api_blueprint.add_url_rule('/model-configs/<int:config_id>', view_func=agent_config.update_model_config, methods=['PUT'])
+api_blueprint.add_url_rule('/model-configs/<int:config_id>', view_func=agent_config.delete_model_config, methods=['DELETE'])
+
+# Agent configs
 api_blueprint.add_url_rule('/agent-configs', view_func=agent_config.list_agent_configs, methods=['GET'])
 api_blueprint.add_url_rule('/agent-configs', view_func=agent_config.upsert_agent_config, methods=['POST'])
 api_blueprint.add_url_rule('/agent-configs/<int:config_id>', view_func=agent_config.update_agent_config, methods=['PUT'])

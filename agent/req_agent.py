@@ -29,7 +29,7 @@ class ReqAgent(ToolCapableAgent):
     """需求解析智能体 — 支持工具调用和多轮交互"""
 
     def __init__(self):
-        super().__init__(model="gpt-4", temperature=0.1, agent_type="req_agent")
+        super().__init__(model="minimax/abab6.5s-chat", temperature=0.1, agent_type="req_agent")
         self.system_prompt = self.custom_system_prompt or """你是一个专业的测试需求分析师。你的任务是将自然语言需求解析为结构化的测试需求。
 
 **文档内容优先级**
@@ -38,6 +38,13 @@ class ReqAgent(ToolCapableAgent):
 - 如果 prompt 中明确说"请打开以下文档链接"但没有预提取内容，说明之前的自动提取失败了，你必须手动用 browser_navigate + browser_extract_content 去提取。如果浏览器也不可用，告诉用户需要手动粘贴文档内容或提供测试地址。
 
 **关键：你没有浏览器也可以工作。** 如果用户已经提供了需求文本（即使是 URL），先用文本中能提取的任何信息开始分析。不要因为无法打开链接就停止——输出你目前能分析出的内容，并在 test_points 中标注哪些需要进一步确认。
+
+**业务模块提取要求（非常重要！）：**
+- 从需求中精确提取每个独立的业务功能模块名称（如"推送配置"、"日报预览"、"历史记录"、"站内消息"），不要泛化为"系统功能"或"页面展示"。
+- 对于 UI 类需求，必须提取所有提到的页面元素（按钮、链接、表单、表格）和交互行为（跳转、点击、填写、选择）。
+- ui_elements 中每个元素必须标注其交互类型：导航跳转类（link/nav）、操作按钮类（button）、表单输入类（input/form）。
+- test_points 中每个测试点必须关联到具体的业务模块，不要生成与需求无关的通用测试点（如仅针对登录的测试点）。
+- 如果需求提到了"跳转"，必须在 test_scenarios 中创建对应的页面导航验证场景。
 
 请按照以下JSON格式输出：
 
@@ -70,7 +77,8 @@ class ReqAgent(ToolCapableAgent):
   "ui_elements": [
     {
       "name": "UI元素名称",
-      "type": "button/input/form/table",
+      "type": "button/input/form/table/link/nav",
+      "interaction": "click/navigate/fill/select",
       "selector": "CSS选择器或XPath",
       "description": "元素描述"
     }
@@ -80,7 +88,8 @@ class ReqAgent(ToolCapableAgent):
       "id": "TP-001",
       "description": "测试点描述",
       "type": "functional/performance/security",
-      "priority": "high/medium/low"
+      "priority": "high/medium/low",
+      "related_module": "关联的业务模块名称"
     }
   ],
   "test_scenarios": [

@@ -34,7 +34,7 @@ class ExecAgent(ToolCapableAgent):
     """执行与报告智能体 — 支持工具调用"""
 
     def __init__(self):
-        super().__init__(model="gpt-4", temperature=0.1, agent_type="exec_agent")
+        super().__init__(model="minimax/abab6.5s-chat", temperature=0.1, agent_type="exec_agent")
 
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         try:

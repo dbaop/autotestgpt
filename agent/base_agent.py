@@ -6,18 +6,26 @@ import json
 import logging
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 import litellm
 from config import Config
 
 logger = logging.getLogger(__name__)
 
-# 模型优先级配置: (config_key, model_name, api_base)
+# 模型优先级配置: (config_key, model_name, api_base) — 兜底 fallback
 _MODEL_PRIORITY = [
     ('MINIMAX_API_KEY', 'minimax/abab6.5s-chat', 'https://api.minimax.chat/v1'),
     ('DEEPSEEK_API_KEY', 'deepseek/deepseek-chat', None),
     ('OPENAI_API_KEY', 'gpt-4', None),
 ]
+
+# 模型标识 → env key 映射：当 Agent.__init__ 指定了 self.model 时，用此表查找 API Key
+_MODEL_ENV_MAP: Dict[str, Tuple[str, Optional[str]]] = {
+    'minimax/abab6.5s-chat': ('MINIMAX_API_KEY', 'https://api.minimax.chat/v1'),
+    'deepseek/deepseek-chat': ('DEEPSEEK_API_KEY', None),
+    'gpt-4': ('OPENAI_API_KEY', None),
+    'openai/doubao-seed-1-6-vision-250815': ('DOUBAO_API_KEY', 'https://ark.cn-beijing.volces.com/api/v3'),
+}
 
 # 视觉模型配置（豆包 doubao-seed-1-6-vision，火山引擎 ARK）
 _VISION_MODEL_CONFIG = {
@@ -28,7 +36,7 @@ _VISION_MODEL_CONFIG = {
 
 
 def _resolve_llm_config():
-    """按优先级解析可用的 LLM 配置"""
+    """按优先级解析可用的 LLM 配置（兜底 fallback）"""
     for key, model, base in _MODEL_PRIORITY:
         api_key = getattr(Config, key, None)
         if api_key:
@@ -42,6 +50,31 @@ def _resolve_vision_config():
     if api_key:
         return _VISION_MODEL_CONFIG['model'], api_key, _VISION_MODEL_CONFIG['api_base']
     return None, None, None
+
+
+def _lookup_model_api(model_name: str) -> Tuple[Optional[str], Optional[str]]:
+    """根据 litellm 模型标识查找 API Key 和 API Base。
+
+    优先查 _MODEL_ENV_MAP，找不到则通过 _MODEL_PRIORITY 前缀匹配。
+    """
+    if model_name in _MODEL_ENV_MAP:
+        env_key, api_base = _MODEL_ENV_MAP[model_name]
+        api_key = getattr(Config, env_key, None)
+        return api_key, api_base
+
+    # 前缀模糊匹配（支持 "minimax/xxx" 匹配 "minimax" provider）
+    for prefix, (env_key, api_base) in _MODEL_ENV_MAP.items():
+        if model_name.startswith(prefix.split('/')[0]):
+            api_key = getattr(Config, env_key, None)
+            return api_key, api_base
+
+    # 兜底：遍历 _MODEL_PRIORITY
+    for env_key, _, api_base in _MODEL_PRIORITY:
+        api_key = getattr(Config, env_key, None)
+        if api_key:
+            return api_key, api_base
+
+    return None, None
 
 
 def load_agent_config(agent_type: str) -> dict | None:
@@ -82,27 +115,56 @@ class BaseAgent(ABC):
             return
         if config.get("system_prompt"):
             self.custom_system_prompt = config["system_prompt"]
-        if config.get("model_name"):
+        # model_config_id 优先于 model_name：从关联的 ModelConfig 读取
+        if config.get("model_config_id"):
+            try:
+                from models import ModelConfig, db
+                mc = db.session.get(ModelConfig, config["model_config_id"])
+                if mc and mc.is_enabled:
+                    self.force_model = mc.model_name
+                    # 从 ModelConfig 读取 api_key_env → Config 读取 key
+                    api_key = getattr(Config, mc.api_key_env, None) if mc.api_key_env else None
+                    self._api_key = api_key
+                    self._api_base = mc.api_base
+            except Exception:
+                pass
+        elif config.get("model_name"):
             self.force_model = config["model_name"]
         if config.get("temperature") is not None:
             self.temperature = config["temperature"]
         if config.get("max_tokens") is not None:
             self.max_tokens = config["max_tokens"]
 
+    def _resolve_model(self) -> Tuple[str, Optional[str], Optional[str]]:
+        """三级优先级解析模型、API Key 和 API Base：
+
+        1. force_model（来自 DB agent_configs.model_config_id 或 model_name）
+        2. self.model 映射到 env vars（使 Agent.__init__ 中指定的 model 真正生效）
+        3. _resolve_llm_config() 优先级链（兜底）
+        """
+        # Level 1: force_model（DB 覆盖）
+        if self.force_model:
+            api_key, api_base = _lookup_model_api(self.force_model)
+            return self.force_model, api_key or self._api_key, api_base or self._api_base
+
+        # Level 2: self.model → env var 映射
+        if self.model:
+            api_key, api_base = _lookup_model_api(self.model)
+            if api_key:
+                return self.model, api_key, api_base
+
+        # Level 3: 兜底优先级链
+        return _resolve_llm_config()
+
     def call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> str:
-        """调用大模型 — 优先使用实例指定的模型，否则按优先级自动选择"""
+        """调用大模型 — 三级优先级：force_model > self.model 映射 > 优先级链"""
         try:
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
 
-            if self.force_model:
-                resolved_model = self.force_model
-                api_key = self._api_key
-                api_base = self._api_base
-            else:
-                resolved_model, api_key, api_base = _resolve_llm_config()
+            resolved_model, api_key, api_base = self._resolve_model()
 
             kwargs = dict(
                 model=resolved_model,
@@ -129,12 +191,7 @@ class BaseAgent(ABC):
     ) -> Generator[str, None, None]:
         token_count = 0
         try:
-            if self.force_model:
-                resolved_model = self.force_model
-                api_key = self._api_key
-                api_base = self._api_base
-            else:
-                resolved_model, api_key, api_base = _resolve_llm_config()
+            resolved_model, api_key, api_base = self._resolve_model()
 
             kwargs = dict(
                 model=resolved_model,
